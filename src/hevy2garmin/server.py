@@ -1385,7 +1385,7 @@ async def settings_save(
     merge_overlap_pct: int = Form(70),
     merge_max_drift_min: int = Form(20),
     merge_extra_types: str = Form(""),
-    merge_watch_strategy: str = Form("replace"),
+    merge_watch_strategy: str = Form("merge"),
 ):
     if is_demo_mode():
         return HTMLResponse('<div class="toast toast-error">Settings are read-only in demo mode</div>')
@@ -1416,7 +1416,7 @@ async def settings_save(
     config["merge_activity_types"] = ["strength_training"] + [
         t for t in dict.fromkeys(extra_types) if t != "strength_training"
     ]
-    config["merge_watch_strategy"] = merge_watch_strategy if merge_watch_strategy in ("replace", "merge", "describe") else "replace"
+    config["merge_watch_strategy"] = merge_watch_strategy if merge_watch_strategy in ("replace", "merge", "describe") else "merge"
     save_config(config)
 
     # Persist settings to DB on cloud (filesystem is read-only on Vercel)
