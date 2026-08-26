@@ -2879,6 +2879,9 @@ async def cron_webhook(request: Request):
 
 def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
     import uvicorn
-    logging.basicConfig(format="%(message)s", level=logging.INFO, force=True)
+    logging.basicConfig(
+        format="%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+        level=logging.INFO, force=True,
+    )
     logger.info("Starting hevy2garmin dashboard at http://localhost:%d", port)
     uvicorn.run(app, host=host, port=port, log_level="warning")
