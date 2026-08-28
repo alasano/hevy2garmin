@@ -1377,6 +1377,7 @@ async def settings_page(request: Request):
 async def settings_save(
     hevy_api_key: str = Form(""), garmin_email: str = Form(""), garmin_password: str = Form(""),
     weight_kg: float = Form(80.0), birth_year: int = Form(1990), sex: str = Form("male"), vo2max: float = Form(45.0),
+    timezone: str = Form(""),
     working_set_seconds: int = Form(40), warmup_set_seconds: int = Form(25),
     rest_between_sets_seconds: int = Form(75), rest_between_exercises_seconds: int = Form(120),
     hr_fusion_enabled: str = Form("off"),
@@ -1397,7 +1398,10 @@ async def settings_save(
         config["garmin_email"] = garmin_email
     if garmin_password:
         config["garmin_password"] = garmin_password
-    config["user_profile"].update(weight_kg=weight_kg, birth_year=birth_year, sex=sex, vo2max=vo2max)
+    config["user_profile"].update(
+        weight_kg=weight_kg, birth_year=birth_year, sex=sex, vo2max=vo2max,
+        timezone=timezone.strip(),
+    )
     config["timing"].update(
         working_set_seconds=working_set_seconds, warmup_set_seconds=warmup_set_seconds,
         rest_between_sets_seconds=rest_between_sets_seconds,

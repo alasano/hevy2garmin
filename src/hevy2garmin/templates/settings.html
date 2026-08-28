@@ -114,6 +114,17 @@
                 <input class="form-input" type="number" id="vo2max" name="vo2max" value="{{ config.get('user_profile', {}).get('vo2max', 45) }}" step="0.1">
                 <div class="form-hint">Used in calorie formula. Auto-filled by "Pull from Garmin".</div>
             </div>
+            <div class="form-group">
+                <label class="form-label" for="timezone">Timezone</label>
+                <input class="form-input" type="text" id="timezone" name="timezone" list="tz-list" placeholder="e.g. Europe/Berlin" value="{{ config.get('user_profile', {}).get('timezone', '') }}">
+                <datalist id="tz-list">
+                    <option value="Europe/London"><option value="Europe/Berlin"><option value="Europe/Madrid"><option value="Europe/Athens">
+                    <option value="America/New_York"><option value="America/Chicago"><option value="America/Denver"><option value="America/Los_Angeles"><option value="America/Sao_Paulo">
+                    <option value="Asia/Dubai"><option value="Asia/Kolkata"><option value="Asia/Singapore"><option value="Asia/Tokyo">
+                    <option value="Australia/Sydney"><option value="Pacific/Auckland">
+                </datalist>
+                <div class="form-hint">Optional IANA name. Stamps your local time into the uploaded file so Strava shows the right time. Leave blank to keep UTC.</div>
+            </div>
         </div>
 
         <!-- Calorie formula explanation -->
