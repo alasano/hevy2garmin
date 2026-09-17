@@ -1,12 +1,12 @@
-"""In-memory two-step Garmin login (password -> MFA) served from the Pi.
+"""In-memory two-step Garmin login (password -> MFA) run on this host.
 
 This is the only module that knows the MFA mechanics; the dashboard and CLI both
-drive it through begin()/complete(). Login happens directly from this host (a
-residential IP Garmin does not block), so the password never leaves the Pi.
+drive it through begin()/complete(). Login happens directly from this host, so
+the password never leaves it.
 
 Pending MFA logins are held in memory between the two HTTP requests; the ``serve``
 daemon is a single long-lived process, so the pending GarminAuth object survives
-from begin() to complete(). Assumes a single worker process (see spec, open risks).
+from begin() to complete(). Assumes a single worker process.
 """
 
 from __future__ import annotations

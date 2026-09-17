@@ -59,7 +59,7 @@ class TestMergeModeFilePersistence:
 
 
 class TestMergeModeDbPersistence:
-    """Verify merge_mode is loaded from DB merge_settings (cloud deployments)."""
+    """Verify merge_mode is loaded from DB merge_settings (database configured)."""
 
     def _make_db_loader(self, app_cache_rows: list[dict]):
         """Return a patched load_config that simulates DB app_cache rows.

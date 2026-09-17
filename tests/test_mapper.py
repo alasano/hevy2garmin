@@ -94,9 +94,9 @@ class TestCustomMappings:
 
 
 class TestSaveCustomMappingCloud:
-    """save_custom_mapping must write to the DB on cloud (#142, #145).
+    """save_custom_mapping must write to the DB when a database is configured (#142, #145).
 
-    The old file-only write 500'd on Vercel's read-only filesystem, so custom
+    The old file-only write never reached the database, so custom
     mappings silently failed to persist (u/Zephyro7, u/fastcoconut).
     """
 

@@ -12,7 +12,6 @@
       <span class="timeline-dot"></span>
       <span class="timeline-name">{{ s.title or 'Routine' }}</span>
       <span class="timeline-wd">{{ p.weekday }}</span>
-      {% if not demo_mode %}
       <button type="button" class="btn btn-secondary btn-sm"
               hx-post="/api/routines/{{ s.hevy_routine_id }}/schedule/{{ s.schedule_id }}/unschedule?page={{ page }}&start={{ start_date }}&q={{ title_query|urlencode }}&size={{ page_size }}"
               hx-target="#scheduled-table" hx-swap="outerHTML"
@@ -20,7 +19,6 @@
               hx-disabled-elt="this" style="font-size:12px; padding:5px 12px; min-height:auto;">
         Remove <span class="htmx-indicator"><span class="spinner"></span></span>
       </button>
-      {% endif %}
     </div>
     {% endfor %}
   </div>

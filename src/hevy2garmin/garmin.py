@@ -30,8 +30,8 @@ def get_client(
 ) -> Garmin:
     """Get an authenticated Garmin client.
 
-    Uses DBTokenStore when DATABASE_URL is set (cloud/Vercel),
-    falls back to file-based tokens (local/Docker).
+    Uses DBTokenStore when a database URL is set,
+    falls back to file-based tokens otherwise.
     """
     auth = GarminAuth(**auth_kwargs(email, password, token_dir))
     return auth.login()
@@ -56,7 +56,7 @@ def auth_kwargs(
     if database_url:
         from garmin_auth.storage import DBTokenStore
         kwargs["store"] = DBTokenStore(database_url)
-        # Use /tmp for garth token files on read-only filesystems (Vercel)
+        # The DB store is authoritative; garth's file cache is disposable, so keep it in /tmp
         kwargs["token_dir"] = "/tmp/.garminconnect"
     else:
         kwargs["token_dir"] = token_dir

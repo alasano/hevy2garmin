@@ -22,12 +22,10 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 
 from hevy2garmin import db, garmin_login, login_ratelimit, __version__
-from hevy2garmin.db_interface import NoWritableDatabaseError
 from hevy2garmin.auth import (
     auth_enabled, verify_session, sign_session, check_password, SESSION_COOKIE, session_ttl,
 )
 from hevy2garmin.config import is_configured, load_config, save_config
-from hevy2garmin.demo import is_demo_mode
 from hevy2garmin.ratelimit import record_rate_limit, cooldown_remaining, clear_rate_limit, format_cooldown
 from hevy2garmin.sync import (
     sync,
@@ -176,7 +174,6 @@ _jinja_env.globals["sched_parts"] = _sched_parts
 def _render(template_name: str, **ctx) -> HTMLResponse:
     t = _jinja_env.get_template(template_name)
     ctx.setdefault("auth_enabled", auth_enabled())
-    ctx.setdefault("demo_mode", is_demo_mode())
     ctx.setdefault("version", __version__)
     prefix = _url_prefix.get()
     ctx.setdefault("url_prefix", prefix)
@@ -185,37 +182,6 @@ def _render(template_name: str, **ctx) -> HTMLResponse:
 
 app = FastAPI(title="hevy2garmin", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-_NO_DB_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>hevy2garmin — database needed</title>
-<style>
- body{margin:0;background:#0f1115;color:#e6e6e6;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
- .card{max-width:560px;margin:24px;padding:32px;background:#171a21;border:1px solid #262b36;border-radius:14px}
- h1{margin:0 0 4px;font-size:20px}
- p{color:#aab2c0}
- ol{padding-left:20px} li{margin:8px 0}
- code{background:#0f1115;border:1px solid #262b36;border-radius:6px;padding:1px 6px;font-size:14px}
- a{color:#7aa2ff}
-</style></head><body><div class="card">
- <h1>Almost there — hevy2garmin needs a database</h1>
- <p>This deployment has no database attached yet. Serverless hosts have a read-only
- filesystem, so the app can't fall back to a local file and needs Postgres.</p>
- <ol>
-  <li>Open your project on <a href="https://vercel.com/dashboard" target="_blank" rel="noopener">Vercel</a>.</li>
-  <li>Go to the <b>Storage</b> tab and add a <b>Neon Postgres</b> database (it's free). This sets <code>POSTGRES_URL</code> automatically.</li>
-  <li>Go to <b>Deployments</b>, open the latest one, and click <b>Redeploy</b>.</li>
- </ol>
- <p>Once the database is connected and it redeploys, this page becomes your dashboard.</p>
-</div></body></html>"""
-
-
-@app.exception_handler(NoWritableDatabaseError)
-async def _no_database_handler(request: Request, exc: NoWritableDatabaseError) -> HTMLResponse:
-    """Render an actionable 'add a database' page instead of a raw 500 (#145, #142)."""
-    logger.warning("No writable database on %s: %s", request.url.path, exc)
-    return HTMLResponse(_NO_DB_PAGE, status_code=503)
 
 
 # ── Auto-sync state ─────────────────────────────────────────────────────────
@@ -325,7 +291,7 @@ def _run_autosync() -> None:
             logger.error("Auto-sync: Hevy API key invalid — disabling auto-sync. %s", e)
             config["auto_sync"]["enabled"] = False
             save_config(config)
-            # Also persist to DB (Vercel filesystem is read-only)
+            # Also persist to the database when one is configured
             if db.get_database_url():
                 try:
                     import json as _json
@@ -401,7 +367,7 @@ def _get_autosync_status() -> dict[str, Any]:
     enabled = auto_cfg.get("enabled", False)
     interval = auto_cfg.get("interval_minutes", 30)
 
-    # On cloud, read persisted state from DB (filesystem config doesn't persist)
+    # With a database configured, the persisted auto-sync state lives there
     if db.get_database_url():
         try:
             import json as _json
@@ -462,7 +428,7 @@ async def _startup_autosync() -> None:
 def client_ip(request: Request) -> str:
     """Best-effort real client IP.
 
-    Behind Vercel/Cloudflare the edge populates ``X-Forwarded-For`` and the
+    Behind a reverse proxy, ``X-Forwarded-For`` is populated and the
     leftmost entry is the original client (proxies append their hops on the
     right). Falls back to ``X-Real-IP``, then the socket peer, and finally the
     literal ``"unknown"`` bucket for header-less clients (so a missing header
@@ -480,8 +446,8 @@ def client_ip(request: Request) -> str:
 def is_https(request: Request) -> bool:
     """True when the original request was HTTPS.
 
-    On Vercel, TLS terminates at the edge and the app sees ``http`` plus an
-    ``X-Forwarded-Proto: https`` header, so we check both.
+    Behind a reverse proxy, TLS terminates at the proxy and the app sees ``http``
+    plus an ``X-Forwarded-Proto: https`` header, so we check both.
     """
     if request.url.scheme == "https":
         return True
@@ -546,8 +512,7 @@ async def check_setup(request: Request, call_next):
 
     # Setup page and sync endpoints: skip the "is configured?" redirect
     if path in ("/login", "/setup", "/api/sync-one", "/api/cron/sync", "/api/cron/webhook",
-                "/api/setup-actions", "/api/garmin-ticket", "/api/garmin-login",
-                "/api/garmin-login-mfa"):
+                "/api/garmin-login", "/api/garmin-login-mfa"):
         response = await call_next(request)
     else:
         # Redirect to setup if not configured
@@ -804,21 +769,9 @@ async def dashboard(request: Request):
         sync_log=db.get_sync_log(10),
         mapping_count=mapping_count,
         garmin_connected=garmin_connected,
-        needs_actions_setup=False,
         garmin_cooldown=garmin_cooldown,
         garmin_cooldown_str=garmin_cooldown_str,
     )
-
-
-
-def _direct_garmin_login() -> bool:
-    """Whether the dashboard collects Garmin credentials itself.
-
-    Off by default: the hosted deployment hands the login to the exchange
-    worker so the app never sees a Garmin password. Self-hosted installs can
-    opt in, keeping the credentials on their own machine.
-    """
-    return os.environ.get("H2G_DIRECT_GARMIN_LOGIN", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 @app.get("/setup", response_class=HTMLResponse)
@@ -831,9 +784,8 @@ async def setup_page(request: Request):
             garmin_cooldown_str = format_cooldown(garmin_cooldown)
     except Exception:
         pass
-    return _render("setup.html", config=load_config(), is_cloud=bool(db.get_database_url()),
-                   garmin_cooldown=garmin_cooldown, garmin_cooldown_str=garmin_cooldown_str,
-                   direct_garmin_login=_direct_garmin_login())
+    return _render("setup.html", config=load_config(), db_backed=bool(db.get_database_url()),
+                   garmin_cooldown=garmin_cooldown, garmin_cooldown_str=garmin_cooldown_str)
 
 
 @app.post("/setup")
@@ -846,9 +798,6 @@ async def setup_save(
     birth_year: int = Form(1990),
     sex: str = Form("male"),
 ):
-    if is_demo_mode():
-        return RedirectResponse("/", status_code=303)
-
     config = load_config()
     if hevy_api_key:
         config["hevy_api_key"] = hevy_api_key
@@ -859,7 +808,7 @@ async def setup_save(
     config["user_profile"]["sex"] = sex
     save_config(config)
 
-    # On cloud deployments, persist credentials to DB so GitHub Actions can read them
+    # With a database configured, persist credentials there so the CLI and cron can read them
     if db.get_database_url():
         try:
             _db = db.get_db()
@@ -886,14 +835,11 @@ async def setup_save(
         except Exception as e:
             logger.warning("Failed to persist credentials to DB: %s", e)
 
-    # Try server-side Garmin auth — LOCAL/self-host only.
+    # Try server-side Garmin auth on the file-backed (SQLite) install only.
     #
-    # On cloud (serverless) deployments we deliberately skip this test login:
-    # the datacenter IP is blocked by Garmin, and real auth happens through the
-    # browser-based worker flow. A server-side login here would either fail or
-    # add to Garmin's per-account login rate limit, surfacing a scary error that
-    # reads like setup failed (#148). Credentials are already persisted to the DB
-    # above, so the scheduled sync can authenticate via the worker.
+    # With a database configured the tokens are already in the DB from the
+    # Connect button, so a second server-side attempt here would only add to
+    # Garmin's per-account login rate limit (#148).
     garmin_pw = garmin_password or os.environ.get("GARMIN_PASSWORD", "")
     garmin_em = garmin_email or config.get("garmin_email", "")
 
@@ -967,81 +913,16 @@ async def setup_save(
         except Exception:
             pass
         return _render("setup.html", config=load_config(), garmin_error=garmin_error,
-                        allow_skip=True, is_cloud=bool(db.get_database_url()),
+                        allow_skip=True, db_backed=bool(db.get_database_url()),
                         garmin_cooldown=_cd2, garmin_cooldown_str=_cd2_str)
 
     response = RedirectResponse("/", status_code=303)
-    # Set auth cookie if HEVY2GARMIN_SECRET is configured (cloud deployments)
+    # Set auth cookie if HEVY2GARMIN_SECRET is configured
     secret = os.environ.get("HEVY2GARMIN_SECRET")
     if secret:
         response.set_cookie("h2g_auth", secret, httponly=True, samesite="strict",
                             secure=is_https(request), max_age=365 * 86400)
     return response
-
-
-# ── Browser-based Garmin auth (ticket exchange) ───────────────────────────
-
-@app.post("/api/garmin-ticket")
-async def garmin_ticket_store(request: Request):
-    """Store pre-exchanged Garmin DI OAuth tokens.
-
-    The token exchange happens via Cloudflare Worker (bypasses cloud IP blocks).
-    The Worker POSTs the ``ST-...`` ticket to Garmin's DI OAuth endpoint and
-    returns ``{di_token, di_refresh_token, di_client_id, ...}``. This endpoint
-    just persists that payload to whichever token store is configured so
-    ``garmin-auth >= 0.3.0`` can pick it up on the next sync.
-    """
-    import json as _json
-    body = await request.json()
-    tokens_data = body.get("tokens")
-    if not isinstance(tokens_data, dict) or not all(
-        k in tokens_data for k in ("di_token", "di_refresh_token", "di_client_id")
-    ):
-        return HTMLResponse(
-            _json.dumps({"error": "Invalid tokens: expected di_token/di_refresh_token/di_client_id"}),
-            status_code=400,
-        )
-
-    # Only keep the fields the new token store cares about; the Worker also
-    # returns metadata like expires_in that garminconnect recomputes itself.
-    payload = {
-        "di_token": tokens_data["di_token"],
-        "di_refresh_token": tokens_data["di_refresh_token"],
-        "di_client_id": tokens_data["di_client_id"],
-    }
-
-    try:
-        database_url = db.get_database_url()
-        if database_url:
-            from garmin_auth.storage import DBTokenStore
-            store = DBTokenStore(database_url)
-            store.save(payload)
-        else:
-            from garmin_auth.storage import FileTokenStore
-            store = FileTokenStore()
-            store.save(payload)
-
-        logger.info("Garmin DI tokens stored successfully")
-        return HTMLResponse(_json.dumps({"ok": True}))
-    except Exception as e:
-        logger.warning("Garmin ticket exchange store failed: %s", e)
-        return HTMLResponse(
-            _json.dumps({"error": str(e)[:200]}),
-            status_code=500,
-        )
-
-
-@app.post("/api/garmin-rate-limited")
-async def api_garmin_rate_limited(request: Request):
-    """Browser reports a Garmin rate_limited response from the worker so we can
-    record the cooldown for display. Returns the cooldown length in seconds."""
-    import json as _json
-    try:
-        seconds = record_rate_limit(db.get_db())
-        return HTMLResponse(_json.dumps({"cooldown_seconds": seconds}))
-    except Exception as e:
-        logger.warning("Could not record rate-limit: %s", e)
-        return HTMLResponse(_json.dumps({"cooldown_seconds": 0}))
 
 
 @app.post("/api/garmin-login")
@@ -1070,10 +951,27 @@ async def garmin_login_begin(request: Request):
             status_code=429,
         )
 
+    # Garmin's own cooldown, recorded from an earlier rate_limited answer.
+    # Retrying resets Garmin's timer, so skip the attempt entirely.
+    cooldown = cooldown_remaining(store) if store else 0
+    if cooldown > 0:
+        return JSONResponse(
+            {"status": "rate_limited", "message": f"Garmin is still cooling down, {format_cooldown(cooldown)} left."},
+            status_code=429,
+        )
+
     result = await run_in_threadpool(garmin_login.begin, email, password)
     if store:
-        if result.get("status") in ("success", "needs_mfa"):
+        status = result.get("status")
+        if status == "success":
             login_ratelimit.clear_failures(store, key)
+            clear_rate_limit(store)
+        elif status == "needs_mfa":
+            login_ratelimit.clear_failures(store, key)
+        elif status == "rate_limited":
+            # Garmin throttled the account. Not a credential failure, so it does
+            # not count against the per-IP lockout.
+            record_rate_limit(store)
         else:
             login_ratelimit.record_failure(store, key)
     return JSONResponse(result)
@@ -1090,6 +988,11 @@ async def garmin_login_mfa(request: Request):
     if not session_id or not code:
         return JSONResponse({"status": "error", "message": "session_id and code required"}, status_code=400)
     result = await run_in_threadpool(garmin_login.complete, session_id, code)
+    if result.get("status") == "success":
+        try:
+            clear_rate_limit(db.get_db())
+        except Exception:
+            pass
     return JSONResponse(result)
 
 
@@ -1388,9 +1291,6 @@ async def settings_save(
     merge_extra_types: str = Form(""),
     merge_watch_strategy: str = Form("merge"),
 ):
-    if is_demo_mode():
-        return HTMLResponse('<div class="toast toast-error">Settings are read-only in demo mode</div>')
-
     config = load_config()
     if hevy_api_key:
         config["hevy_api_key"] = hevy_api_key
@@ -1423,7 +1323,7 @@ async def settings_save(
     config["merge_watch_strategy"] = merge_watch_strategy if merge_watch_strategy in ("replace", "merge", "describe") else "merge"
     save_config(config)
 
-    # Persist settings to DB on cloud (filesystem is read-only on Vercel)
+    # Persist settings to the database when one is configured
     if db.get_database_url():
         try:
             _db = db.get_db()
@@ -1463,7 +1363,7 @@ async def api_save_mapping(request: Request):
     if category not in valid_cats:
         return HTMLResponse(f'<div class="toast toast-error">Invalid category ID {category}</div>')
 
-    # Save to DB on cloud, filesystem locally
+    # Database when configured, filesystem otherwise
     if db.get_database_url():
         _db = db.get_db()
         if hasattr(_db, 'save_custom_mapping'):
@@ -1500,8 +1400,6 @@ async def api_reload_data(request: Request):
     workout in Hevy was not reflected until the next sync. This button drops the
     cached pages and reloads with fresh data (#174).
     """
-    if is_demo_mode():
-        return HTMLResponse('<div class="toast toast-error">Read-only in demo mode</div>')
     config = load_config()
     try:
         from hevy2garmin.hevy import HevyClient
@@ -1621,34 +1519,6 @@ async def api_pull_garmin_profile(request: Request):
 async def api_sync(request: Request):
     global _last_sync_time
 
-    if is_demo_mode():
-        from fastapi.responses import JSONResponse
-        return JSONResponse({"status": "demo", "message": "Sync disabled in demo mode"})
-
-    # If GitHub PAT + repo are set (Vercel deploy), trigger sync via GitHub Actions
-    github_pat = os.environ.get("GITHUB_PAT")
-    github_repo = os.environ.get("GITHUB_REPO")
-    if github_pat and github_repo:
-        import requests as req
-
-        resp = req.post(
-            f"https://api.github.com/repos/{github_repo}/dispatches",
-            headers={
-                "Authorization": f"Bearer {github_pat}",
-                "Accept": "application/vnd.github+json",
-            },
-            json={"event_type": "sync-trigger"},
-            timeout=10,
-        )
-        if resp.ok:
-            return HTMLResponse(
-                '<div class="toast toast-success">Sync triggered via GitHub Actions.'
-                " Workouts will appear in a few minutes.</div>"
-            )
-        return HTMLResponse(
-            f'<div class="toast toast-error">Failed to trigger sync: HTTP {resp.status_code}</div>'
-        )
-
     form = await request.form()
     scope = form.get("scope", "recent")
 
@@ -1729,7 +1599,7 @@ def _schedules_context(
 
 
 # Timestamp cache for the page-load routine reconciliation, kept in the app_config KV
-# store (like ratelimit's cooldown) so it survives serverless restarts. The reconcile
+# store (like ratelimit's cooldown) so it survives restarts. The reconcile
 # *result* is the synced_routines.status column itself — this only throttles the check.
 _ROUTINE_RECONCILE_KEY = "routine_reconcile"
 _ROUTINE_RECONCILE_TTL = 300  # seconds
@@ -1855,9 +1725,6 @@ async def api_routines_schedules(
 @app.post("/api/routines/sync", response_class=HTMLResponse)
 async def api_routines_sync(request: Request):
     """Create Garmin planned workouts from all Hevy routines."""
-    if is_demo_mode():
-        return HTMLResponse('<div class="toast toast-success">Sync disabled in demo mode.</div>')
-
     form = await request.form()
     force = form.get("force") in ("1", "true", "on")
 
@@ -1888,9 +1755,6 @@ async def api_routines_sync(request: Request):
 @app.post("/api/routines/{hevy_routine_id}/sync", response_class=HTMLResponse)
 async def api_routine_sync_one(request: Request, hevy_routine_id: str):
     """Sync a single Hevy routine and swap its table row in place."""
-    if is_demo_mode():
-        return HTMLResponse('<div class="toast toast-success">Sync disabled in demo mode.</div>')
-
     form = await request.form()
     force = form.get("force") in ("1", "true", "on")
 
@@ -1922,9 +1786,6 @@ async def api_routine_sync_one(request: Request, hevy_routine_id: str):
 @app.post("/api/routines/{hevy_routine_id}/schedule", response_class=HTMLResponse)
 async def api_routine_schedule(request: Request, hevy_routine_id: str):
     """Schedule one synced routine on the Garmin calendar (once or recurring weekly)."""
-    if is_demo_mode():
-        return HTMLResponse('<div class="toast toast-success">Scheduling disabled in demo mode.</div>')
-
     form = await request.form()
     mode = form.get("mode", "once")
     try:
@@ -1967,9 +1828,6 @@ async def api_routine_unschedule(
     size: int = _SCHEDULES_PAGE_SIZE,
 ):
     """Remove one scheduled calendar entry, then re-render the schedules table."""
-    if is_demo_mode():
-        return HTMLResponse('<div class="toast toast-success">Unscheduling disabled in demo mode.</div>')
-
     if not _acquire_sync_lock():
         return HTMLResponse('<div class="toast toast-error">Another sync is already running. Please wait.</div>')
 
@@ -2165,9 +2023,6 @@ async def api_unsync_all(request: Request):
     """Remove ALL sync records. Does not delete from Garmin."""
     from fastapi.responses import JSONResponse
 
-    if is_demo_mode():
-        return JSONResponse({"ok": False, "error": "Read-only in demo mode"}, status_code=403)
-
     form = await request.form()
     confirm = form.get("confirm", "")
     if confirm != "RESET":
@@ -2206,10 +2061,6 @@ async def api_scan_duplicates(request: Request):
 
 @app.post("/api/toggle-autosync", response_class=HTMLResponse)
 async def api_toggle_autosync(request: Request):
-    if is_demo_mode():
-        from fastapi.responses import JSONResponse
-        return JSONResponse({"status": "demo", "message": "Sync disabled in demo mode"})
-
     form = await request.form()
     enabled_raw = form.get("enabled", "false")
     enabled = enabled_raw in ("true", "True", "1", True)
@@ -2226,7 +2077,7 @@ async def api_toggle_autosync(request: Request):
     config["auto_sync"]["interval_minutes"] = interval
     save_config(config)
 
-    # Persist auto-sync state to DB on cloud deployments (filesystem is read-only)
+    # Persist auto-sync state to the database when one is configured
     if db.get_database_url():
         try:
             import json as _json
@@ -2244,234 +2095,14 @@ async def api_toggle_autosync(request: Request):
             logger.warning("Failed to persist auto-sync state: %s", e)
 
     if enabled:
-        if os.environ.get("VERCEL") and os.environ.get("GITHUB_PAT"):
-            ok, msg = await _setup_github_actions(interval_minutes=interval)
-            if ok:
-                logger.info("GitHub Actions auto-sync configured (interval=%dmin)", interval)
-            else:
-                logger.warning("Failed to set up GitHub Actions: %s", msg)
-        else:
-            _schedule_autosync(interval)
+        _schedule_autosync(interval)
         logger.info("Auto-sync enabled: every %d min", interval)
     else:
         _stop_autosync()
-        # On Vercel: delete the sync workflow to stop the cron
-        if os.environ.get("VERCEL") and os.environ.get("GITHUB_PAT"):
-            try:
-                import requests as req
-                pat = os.environ.get("GITHUB_PAT")
-                owner = os.environ.get("VERCEL_GIT_REPO_OWNER")
-                repo_name = os.environ.get("VERCEL_GIT_REPO_SLUG")
-                gh_headers = {"Authorization": f"Bearer {pat}", "Accept": "application/vnd.github+json"}
-                wf = req.get(f"https://api.github.com/repos/{owner}/{repo_name}/contents/.github/workflows/sync.yml",
-                             headers=gh_headers, timeout=10)
-                if wf.status_code == 200:
-                    req.delete(f"https://api.github.com/repos/{owner}/{repo_name}/contents/.github/workflows/sync.yml",
-                               headers=gh_headers, json={"message": "disable auto-sync", "sha": wf.json()["sha"]}, timeout=10)
-                    logger.info("Deleted sync workflow from %s/%s", owner, repo_name)
-            except Exception as e:
-                logger.warning("Failed to delete sync workflow: %s", e)
         logger.info("Auto-sync disabled")
 
     auto_sync = _get_autosync_status()
     return _render("partials/autosync_status.html", auto_sync=auto_sync)
-
-
-# ── Vercel / Cloud endpoints ──────────────────────────────────────────────
-
-
-def _minutes_to_cron(minutes: int) -> str:
-    """Convert an interval in minutes to a GitHub Actions cron expression.
-
-    Supports the discrete values exposed in the dashboard select:
-    30, 60, 120, 240, 360, 720, 1440. Falls back to '0 */2 * * *' for
-    anything unexpected.
-    """
-    if minutes == 30:
-        return "*/30 * * * *"
-    if minutes == 60:
-        return "0 * * * *"
-    if minutes == 1440:
-        return "0 0 * * *"
-    if minutes >= 60 and minutes % 60 == 0:
-        hours = minutes // 60
-        return f"0 */{hours} * * *"
-    return "0 */2 * * *"
-
-
-def _build_sync_workflow_yaml(interval_minutes: int) -> str:
-    """Build the sync.yml workflow content with the given cron interval."""
-    cron = _minutes_to_cron(interval_minutes)
-    return (
-        "name: Sync Workouts\n\n"
-        "on:\n"
-        "  schedule:\n"
-        f"    - cron: '{cron}'\n"
-        "  workflow_dispatch: {}\n"
-        "  repository_dispatch:\n"
-        "    types: [sync-trigger]\n\n"
-        "concurrency:\n"
-        "  group: sync\n"
-        "  cancel-in-progress: false\n\n"
-        "jobs:\n"
-        "  sync:\n"
-        "    runs-on: ubuntu-latest\n"
-        "    timeout-minutes: 30\n"
-        "    steps:\n"
-        "      - uses: actions/checkout@v5\n"
-        "      - uses: actions/setup-python@v6\n"
-        "        with:\n"
-        "          python-version: '3.12'\n"
-        "      - name: Install\n"
-        "        run: pip install \".[cloud]\"\n"
-        "      - name: Sync\n"
-        "        env:\n"
-        "          DATABASE_URL: ${{ secrets.DATABASE_URL }}\n"
-        "        run: hevy2garmin sync\n"
-    )
-
-
-def _format_interval_label(minutes: int) -> str:
-    """Human-friendly label for interval (e.g., '30 minutes', '1 hour', '2 hours')."""
-    if minutes < 60:
-        return f"{minutes} minutes"
-    if minutes == 60:
-        return "1 hour"
-    if minutes == 1440:
-        return "24 hours"
-    if minutes % 60 == 0:
-        return f"{minutes // 60} hours"
-    return f"{minutes} minutes"
-
-
-async def _setup_github_actions(interval_minutes: int = 120) -> tuple[bool, str]:
-    """Configure GitHub Actions on the user's fork.
-
-    Parallelizes independent GitHub API calls (PATCH repo, PUT actions,
-    GET public-key, GET workflow) to keep latency low. Returns (ok, message).
-    """
-    import asyncio
-    from base64 import b64encode
-
-    pat = os.environ.get("GITHUB_PAT")
-    owner = os.environ.get("VERCEL_GIT_REPO_OWNER")
-    repo = os.environ.get("VERCEL_GIT_REPO_SLUG")
-    database_url = db.get_database_url()
-
-    if not pat:
-        return False, "GITHUB_PAT not set"
-    if not owner or not repo:
-        return False, "Not deployed via Vercel (missing repo info)"
-    if not database_url:
-        return False, "DATABASE_URL not set"
-
-    import requests as req
-
-    headers = {
-        "Authorization": f"Bearer {pat}",
-        "Accept": "application/vnd.github+json",
-    }
-    base = f"https://api.github.com/repos/{owner}/{repo}"
-    wf_url = f"{base}/contents/.github/workflows/sync.yml"
-
-    # Round 1 (parallel): independent calls
-    def _patch_public():
-        return req.patch(base, headers=headers, json={"private": False}, timeout=10)
-
-    def _enable_actions():
-        return req.put(f"{base}/actions/permissions", headers=headers, json={"enabled": True}, timeout=10)
-
-    def _get_public_key():
-        return req.get(f"{base}/actions/secrets/public-key", headers=headers, timeout=10)
-
-    def _get_workflow():
-        return req.get(wf_url, headers=headers, timeout=10)
-
-    try:
-        _, actions_resp, pk_resp, wf_resp = await asyncio.gather(
-            asyncio.to_thread(_patch_public),
-            asyncio.to_thread(_enable_actions),
-            asyncio.to_thread(_get_public_key),
-            asyncio.to_thread(_get_workflow),
-        )
-
-        if actions_resp.status_code not in (200, 204):
-            return False, f"Failed to enable Actions: HTTP {actions_resp.status_code}"
-        if not pk_resp.ok:
-            return False, f"Failed to get repo public key: HTTP {pk_resp.status_code}"
-
-        # Encrypt the secret with the public key (CPU-bound, fast)
-        from nacl import encoding, public
-
-        pk_data = pk_resp.json()
-        pk = public.PublicKey(pk_data["key"].encode("utf-8"), encoding.Base64Encoder())
-        sealed = public.SealedBox(pk).encrypt(database_url.encode("utf-8"))
-        encrypted_value = b64encode(sealed).decode("utf-8")
-
-        sync_yml = _build_sync_workflow_yaml(interval_minutes)
-        wf_payload: dict = {
-            "message": f"feat: auto-sync every {_format_interval_label(interval_minutes)}",
-            "content": b64encode(sync_yml.encode()).decode(),
-        }
-        if wf_resp.status_code == 200:
-            wf_payload["sha"] = wf_resp.json().get("sha")
-
-        # Round 2 (parallel): writes
-        def _put_secret():
-            return req.put(
-                f"{base}/actions/secrets/DATABASE_URL",
-                headers=headers,
-                json={"encrypted_value": encrypted_value, "key_id": pk_data["key_id"]},
-                timeout=10,
-            )
-
-        def _put_workflow():
-            return req.put(wf_url, headers=headers, json=wf_payload, timeout=10)
-
-        secret_resp, _ = await asyncio.gather(
-            asyncio.to_thread(_put_secret),
-            asyncio.to_thread(_put_workflow),
-        )
-
-        if secret_resp.status_code not in (200, 201, 204):
-            return False, f"Failed to set DATABASE_URL secret: HTTP {secret_resp.status_code}"
-
-        # Fire-and-forget initial sync trigger (don't block on it)
-        async def _trigger_initial_sync():
-            try:
-                await asyncio.to_thread(
-                    lambda: req.post(
-                        f"{base}/dispatches",
-                        headers=headers,
-                        json={"event_type": "sync-trigger"},
-                        timeout=10,
-                    )
-                )
-            except Exception:
-                pass
-
-        asyncio.create_task(_trigger_initial_sync())
-
-        return True, f"Auto-sync enabled! Workouts will sync every {_format_interval_label(interval_minutes)}."
-    except Exception as e:
-        return False, f"Failed to set up auto-sync: {e}"
-
-
-@app.post("/api/setup-actions", response_class=HTMLResponse)
-async def api_setup_actions(request: Request):
-    """Auto-configure GitHub Actions on the user's fork."""
-    interval = 120
-    try:
-        form = await request.form()
-        raw_interval = form.get("interval", 120)
-        interval = int(raw_interval)
-    except (ValueError, TypeError):
-        interval = 120
-    except Exception:
-        pass
-    ok, msg = await _setup_github_actions(interval_minutes=interval)
-    cls = "toast-success" if ok else "toast-error"
-    return HTMLResponse(f'<div class="toast {cls}">{msg}</div>')
 
 
 @app.post("/api/sync-one")
@@ -2498,9 +2129,6 @@ async def _sync_one_recorded(
     import json as _json
 
     from fastapi.responses import JSONResponse
-
-    if is_demo_mode():
-        return JSONResponse({"status": "demo", "message": "Sync disabled in demo mode"})
 
     if not _acquire_sync_lock():
         return JSONResponse({"error": "Sync already running", "busy": True})
@@ -2570,7 +2198,7 @@ def _scan_for_unsynced(hevy, is_synced, total_count, failed_ids, on_page=None):
 async def _do_sync_one(*, respect_grace: bool = False, merge_only: bool = False):
     """Inner sync logic, called with _sync_executing lock held.
 
-    ``respect_grace`` is True for Vercel cron (wait for watch data) and False
+    ``respect_grace`` is True for cron (wait for watch data) and False
     for manual Sync Now.
     """
     from fastapi.responses import JSONResponse
@@ -2725,10 +2353,10 @@ def _bearer_ok(request: Request, secret: str) -> bool:
 
 @app.get("/api/cron/sync")
 async def cron_sync(request: Request, merge_only: bool = Query(False)):
-    """Vercel cron endpoint. Syncs 1 workout per invocation."""
+    """Cron endpoint. Syncs 1 workout per invocation."""
     from fastapi.responses import JSONResponse
 
-    # Vercel sets CRON_SECRET to verify cron requests
+    # CRON_SECRET authenticates external cron callers
     cron_secret = os.environ.get("CRON_SECRET")
     if cron_secret:
         if not _bearer_ok(request, cron_secret):
@@ -2751,16 +2379,6 @@ WEBHOOK_MAX_ATTEMPTS = int(os.environ.get("WEBHOOK_MAX_ATTEMPTS", "3"))
 WEBHOOK_MAX_INFLIGHT = int(os.environ.get("WEBHOOK_MAX_INFLIGHT", "4"))
 
 _webhook_tasks: set = set()  # strong refs — bare asyncio tasks get garbage collected
-
-
-def _can_run_background_work() -> bool:
-    """Whether work scheduled now will still run after the response is sent.
-
-    False on serverless, where the function is frozen or torn down as soon as
-    it responds: an asyncio task created here would simply never be resumed.
-    Python on Vercel has no `waitUntil` equivalent to hand the work to.
-    """
-    return not os.environ.get("VERCEL")
 
 
 async def _webhook_sync() -> None:
@@ -2796,40 +2414,12 @@ async def _webhook_sync() -> None:
     )
 
 
-async def _webhook_sync_serverless():
-    """Handle the webhook without background work, for serverless deployments.
-
-    There is no "later" here: the process stops at the response, so the staged
-    retry cannot run. What is safe to do instead depends on the watch merge:
-
-    - Merge on (the default): the watch activity has almost certainly not
-      reached Garmin Connect yet. Uploading now produces exactly the duplicate
-      the merge exists to prevent, and there is no second attempt to wait for,
-      so hand the workout to the platform cron and only say so.
-    - Merge off: nothing is being waited for, so sync immediately — which is
-      the whole point of a webhook, and a large win over a daily cron.
-    """
-    from fastapi.responses import JSONResponse
-
-    if load_config().get("merge_mode", True):
-        logger.info(
-            "Hevy webhook received on a serverless deployment with the watch merge on — "
-            "leaving it to the scheduled sync so the watch activity can land first"
-        )
-        return JSONResponse({"status": "deferred", "reason": "no background work; cron will sync"})
-
-    logger.info("Hevy webhook received — syncing now (watch merge off, nothing to wait for)")
-    return await _sync_one_recorded(respect_grace=False, trigger="webhook")
-
-
 @app.post("/api/cron/webhook")
 async def cron_webhook(request: Request):
     """Hevy webhook endpoint, fired when a workout is saved.
 
-    Hevy expects a 200 within a few seconds, so on a long-running deployment
-    this only checks the Bearer token and schedules the staged sync in the
-    background. Serverless has no background to schedule into — see
-    _webhook_sync_serverless.
+    Hevy expects a 200 within a few seconds, so this only checks the Bearer
+    token and schedules the staged sync in the background.
     """
     import asyncio
 
@@ -2838,8 +2428,8 @@ async def cron_webhook(request: Request):
     # Fail CLOSED. This endpoint is internet-facing by design and is exempt from
     # the dashboard cookie/CSRF middleware, so treating "no secret set" as "no
     # auth needed" leaves an anonymous sync trigger exposed on any instance
-    # whose owner set a dashboard password but read CRON_SECRET as a Vercel-only
-    # concern. Unconfigured means unavailable, not open.
+    # whose owner set a dashboard password but assumed CRON_SECRET only matters
+    # for the scheduled cron. Unconfigured means unavailable, not open.
     cron_secret = os.environ.get("CRON_SECRET")
     if not cron_secret:
         logger.warning(
@@ -2852,9 +2442,6 @@ async def cron_webhook(request: Request):
     if not _bearer_ok(request, cron_secret):
         logger.warning("Hevy webhook rejected: bad or missing Authorization header")
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    if not _can_run_background_work():
-        return await _webhook_sync_serverless()
 
     # Each accepted request owns a task for up to WEBHOOK_DELAY +
     # (MAX_ATTEMPTS - 1) * RETRY_INTERVAL seconds (~25 min by default), so

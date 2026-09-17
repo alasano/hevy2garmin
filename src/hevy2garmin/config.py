@@ -73,7 +73,7 @@ def load_config() -> dict[str, Any]:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Could not load config: %s", e)
 
-    # Load credentials + settings from DB in one connection (cloud deployments)
+    # Load credentials + settings from DB in one connection (database configured)
     from hevy2garmin.db import get_database_url
     database_url = get_database_url()
     if database_url:
@@ -119,7 +119,7 @@ def load_config() -> dict[str, Any]:
         config["garmin_password"] = os.environ["GARMIN_PASSWORD"]
 
     # Normalize credential whitespace. A stray leading/trailing newline (the classic
-    # copy-paste mistake) breaks the API call, and on the Vercel deploy the stored DB
+    # copy-paste mistake) breaks the API call, and with a database configured the stored DB
     # value takes precedence over the env var, so the user can't clear it by editing
     # the variable. Stripping on read fixes new and existing values alike. (#257)
     for _cred in ("hevy_api_key", "garmin_email", "garmin_password"):
@@ -130,12 +130,11 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(config: dict[str, Any]) -> None:
-    """Persist config: to file (local/Docker) and to the DB on cloud deployments.
+    """Persist config: to file, and to the DB when a database is configured.
 
-    On serverless (Vercel) the home filesystem is read-only, so the file write
-    is a no-op and the canonical store is the Postgres ``app_cache`` table. We
-    write the same keys ``load_config()`` reads back, so settings survive across
-    stateless invocations instead of reverting to defaults (#139, #145).
+    With a database configured the canonical store for user-editable settings is
+    the ``app_cache`` table. We write the same keys ``load_config()`` reads back,
+    so settings survive across processes instead of reverting to defaults (#139, #145)
     """
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -143,9 +142,9 @@ def save_config(config: dict[str, Any]) -> None:
     except OSError:
         logger.debug("Skipping config file write (read-only filesystem)")
 
-    # Cloud deployments: persist user-editable settings to the DB so callers
-    # that only call save_config() (e.g. Pull-from-Garmin) don't silently lose
-    # data on read-only filesystems. Symmetric with the keys load_config() reads.
+    # With a database configured, persist user-editable settings there so callers
+    # that only call save_config() (e.g. Pull-from-Garmin) are read back by
+    # load_config(), which prefers the DB. Symmetric with the keys it reads.
     from hevy2garmin.db import get_database_url
 
     if not get_database_url():
@@ -171,15 +170,15 @@ def get(key: str, default: Any = None) -> Any:
 def is_configured() -> bool:
     """Check if initial setup has been done.
 
-    On Vercel (DATABASE_URL set): requires both API key AND Garmin tokens in DB.
-    Locally: just checks for API key (tokens are file-based).
+    With a database configured: requires both the API key and Garmin tokens in the DB.
+    Otherwise: just checks for the API key (tokens are file-based).
     """
     import os
     config = load_config()
     if not config.get("hevy_api_key"):
         return False
-    # On cloud deployments, check that Garmin setup started (either credentials
-    # saved from setup form, or tokens from browser-based auth, or hevy key in DB)
+    # With a database configured, check that Garmin setup started (credentials
+    # saved from the setup form, tokens from the Connect button, or hevy key in DB)
     from hevy2garmin.db import get_database_url
     if get_database_url():
         try:

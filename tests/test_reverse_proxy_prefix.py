@@ -22,7 +22,6 @@ from fastapi.testclient import TestClient
 def client(monkeypatch):
     """Client with the header explicitly trusted — the deployed-behind-a-proxy case."""
     os.environ.pop("HEVY2GARMIN_SECRET", None)
-    os.environ.pop("DEMO_MODE", None)
     monkeypatch.setenv("H2G_TRUST_FORWARDED_PREFIX", "1")
     from hevy2garmin.server import app
 
@@ -33,7 +32,6 @@ def client(monkeypatch):
 def untrusting_client():
     """Client with the flag absent — the default, and every non-proxied install."""
     os.environ.pop("HEVY2GARMIN_SECRET", None)
-    os.environ.pop("DEMO_MODE", None)
     os.environ.pop("H2G_TRUST_FORWARDED_PREFIX", None)
     from hevy2garmin.server import app
 
@@ -75,10 +73,9 @@ class TestReverseProxyPrefix:
 
         Not just fetch(): a bare `const url = '/api/…'` or a
         `location.href = '/'` escapes the prefix just as thoroughly, and those
-        are the forms the direct-login POSTs and the post-connect redirect used.
+        are the forms the direct-login POSTs used.
         """
         resp = client.get("/setup", headers={"X-Forwarded-Prefix": "/apps/hevy2garmin"})
-        assert "window.APP_PREFIX + '/api/garmin-ticket'" in resp.text
         for pattern in (
             r"fetch\((['\"])/(?!/)",            # fetch('/…')
             r"=\s*(['\"])/api/(?!/)",           # const url = '/api/…'
@@ -87,15 +84,10 @@ class TestReverseProxyPrefix:
             assert not re.search(pattern, resp.text), pattern
 
     def test_direct_login_posts_are_prefixed(self, client):
-        """H2G_DIRECT_GARMIN_LOGIN is exactly the self-hosted sub-path case."""
+        """The self-hosted sub-path case: the login POSTs must carry the prefix."""
         resp = client.get("/setup", headers={"X-Forwarded-Prefix": "/apps/hevy2garmin"})
         assert "window.APP_PREFIX + '/api/garmin-login'" in resp.text
         assert "window.APP_PREFIX + '/api/garmin-login-mfa'" in resp.text
-
-    def test_post_connect_redirect_is_prefixed(self, client):
-        """Fires on every successful Garmin connect; bounced sub-path users home."""
-        resp = client.get("/setup", headers={"X-Forwarded-Prefix": "/apps/hevy2garmin"})
-        assert "window.location.href = (window.APP_PREFIX || '') + '/'" in resp.text
 
 
 class TestServerRenderedUrlsArePrefixed:

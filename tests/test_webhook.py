@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client_with_cron_secret():
     with patch.dict(os.environ, {"CRON_SECRET": "cron-123"}):
-        os.environ.pop("VERCEL", None)
         from hevy2garmin.server import app
         yield TestClient(app)
 
@@ -45,7 +44,6 @@ class TestWebhookEndpoint:
         with patch.dict(
             os.environ, {"HEVY2GARMIN_SECRET": "dash-secret", "CRON_SECRET": "cron-123"}
         ):
-            os.environ.pop("VERCEL", None)
             from hevy2garmin.server import app
             client = TestClient(app)
             with patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock):
@@ -67,7 +65,6 @@ class TestWebhookAuthFailsClosed:
     def test_unset_cron_secret_refuses_instead_of_accepting(self) -> None:
         with patch.dict(os.environ, {"HEVY2GARMIN_SECRET": "dash-password"}):
             os.environ.pop("CRON_SECRET", None)
-            os.environ.pop("VERCEL", None)
             from hevy2garmin.server import app
 
             with patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock) as worker:
@@ -195,82 +192,3 @@ class TestWebhookWorker:
         ):
             asyncio.run(server._webhook_sync())
         assert calls == [True], "auto-sync is the safety net; don't hammer a broken backend"
-
-
-class TestServerlessDeployment:
-    """A serverless function is frozen at the response, so the staged retry
-    cannot run there. The webhook must then do something safe rather than
-    scheduling work that silently never happens."""
-
-    @pytest.fixture
-    def vercel_client(self):
-        with patch.dict(os.environ, {"CRON_SECRET": "cron-123", "VERCEL": "1"}):
-            from hevy2garmin.server import app
-            yield TestClient(app)
-
-    def test_background_work_is_not_scheduled_on_vercel(self, vercel_client) -> None:
-        from hevy2garmin import server
-
-        with (
-            patch.object(server, "load_config", lambda: {"merge_mode": True}),
-            patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock) as worker,
-        ):
-            resp = vercel_client.post(
-                "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
-            )
-        assert resp.status_code == 200
-        worker.assert_not_called()
-
-    def test_with_the_watch_merge_on_it_defers_to_cron(self, vercel_client) -> None:
-        """Uploading now would create the duplicate the merge exists to avoid."""
-        from hevy2garmin import server
-
-        called = []
-
-        async def fake_sync(**kw):
-            called.append(kw)
-            return JSONResponse({"synced": 1})
-
-        with (
-            patch.object(server, "load_config", lambda: {"merge_mode": True}),
-            patch.object(server, "_sync_one_recorded", fake_sync),
-        ):
-            resp = vercel_client.post(
-                "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
-            )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "deferred"
-        assert called == []
-
-    def test_with_the_watch_merge_off_it_syncs_inline(self, vercel_client) -> None:
-        """Nothing to wait for, so the webhook delivers its actual benefit."""
-        from hevy2garmin import server
-
-        called = []
-
-        async def fake_sync(**kw):
-            called.append(kw)
-            return JSONResponse({"synced": 1, "title": "Push"})
-
-        with (
-            patch.object(server, "load_config", lambda: {"merge_mode": False}),
-            patch.object(server, "_sync_one_recorded", fake_sync),
-        ):
-            resp = vercel_client.post(
-                "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
-            )
-        assert resp.status_code == 200
-        assert resp.json()["synced"] == 1
-        assert called == [{"respect_grace": False, "trigger": "webhook"}]
-
-    def test_auth_is_still_enforced_on_serverless(self, vercel_client) -> None:
-        assert vercel_client.post("/api/cron/webhook").status_code == 401
-
-    def test_background_capability_is_derived_from_the_platform(self) -> None:
-        from hevy2garmin.server import _can_run_background_work
-
-        with patch.dict(os.environ, {"VERCEL": "1"}):
-            assert _can_run_background_work() is False
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("VERCEL", None)
-            assert _can_run_background_work() is True

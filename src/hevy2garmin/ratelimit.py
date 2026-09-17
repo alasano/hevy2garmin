@@ -4,7 +4,7 @@ When Garmin rate-limits a login (HTTP 429), retrying resets and deepens the time
 on Garmin's side, so we enforce a local cooldown: record when it happened, block
 further login attempts until the window passes, and back off exponentially on
 repeat hits. State lives in the ``app_config`` key-value store so it survives
-serverless restarts. Reset to the base window after a clean login.
+restarts. Reset to the base window after a clean login.
 
 All functions take a ``db`` (a Database instance exposing ``get_app_config`` /
 ``set_app_config``) and are best-effort: a storage failure never raises.

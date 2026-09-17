@@ -972,13 +972,6 @@ class TestRoutineSyncUI:
         assert "toast-error" in resp.text
         assert "hx-swap-oob" not in resp.text  # no row swap on failure
 
-    def test_sync_route_demo_mode(self, tmp_path: Path) -> None:
-        store = SQLiteDatabase(tmp_path / "ui.db")
-        db_patch, client = self._client(store)
-        with db_patch, client, patch.object(srv, "is_demo_mode", return_value=True):
-            resp = client.post("/api/routines/r1/sync")
-        assert "demo mode" in resp.text
-
 
 class TestRoutinesPageUI:
     """GET /routines — the 'Updated on Hevy' drift badge."""

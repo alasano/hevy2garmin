@@ -22,7 +22,7 @@ def _local_mode(monkeypatch):
 
     The Postgres CI job sets DATABASE_URL globally; without this, save_config
     would write to the shared test DB and pollute later load_config() reads.
-    Cloud-specific tests opt back in by patching get_database_url/get_db.
+    Database-backed tests opt back in by patching get_database_url/get_db.
     """
     for var in ("DATABASE_URL", "POSTGRES_URL", "STORAGE_URL", "NEON_DATABASE_URL"):
         monkeypatch.delenv(var, raising=False)
@@ -114,11 +114,11 @@ class TestIsConfigured:
 
 
 class TestSaveConfigCloud:
-    """save_config must persist settings to the DB on cloud deployments (#139, #145).
+    """save_config must persist settings to the DB when a database is configured (#139, #145).
 
-    The home filesystem is read-only on serverless, so a file-only write
-    silently lost profile/timing/hr_fusion changes (e.g. Pull-from-Garmin),
-    which then reverted to defaults on the next stateless invocation.
+    With a database configured, load_config() prefers DB values, so a file-only
+    write was never read back and profile/timing/hr_fusion changes (e.g.
+    Pull-from-Garmin) reverted on the next request.
     """
 
     def test_persists_app_keys_to_db_on_cloud(self, tmp_path: Path) -> None:

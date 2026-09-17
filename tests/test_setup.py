@@ -1,9 +1,9 @@
 """Tests for the setup flow.
 
-#148: on cloud deployments the setup POST must NOT perform a redundant
-server-side Garmin test login (datacenter IP is blocked + it trips Garmin's
-per-account rate limit and shows a scary error). Local installs keep the test
-login because that's the real auth path that caches tokens.
+#148: with a database configured the setup POST must NOT perform a redundant
+server-side Garmin test login (it trips Garmin's per-account rate limit and
+shows a scary error). File-backed installs keep the test login because that's
+the real auth path that caches tokens.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ def client():
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("HEVY2GARMIN_SECRET", None)
         os.environ.pop("GARMIN_PASSWORD", None)
-        os.environ.pop("DEMO_MODE", None)
         from hevy2garmin.server import app
         yield TestClient(app, follow_redirects=False)
 

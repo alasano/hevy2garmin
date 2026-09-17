@@ -6,15 +6,6 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 
-class NoWritableDatabaseError(RuntimeError):
-    """No Postgres URL is set and the local SQLite fallback cannot be written.
-
-    Happens on serverless deploys (Vercel/Lambda) where the home filesystem is
-    read-only and no database has been attached. Handlers catch this to show an
-    actionable "add a database" message instead of a raw 500 (#145, #142).
-    """
-
-
 class Database(ABC):
     """Abstract base class for workout sync storage."""
 

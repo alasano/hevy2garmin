@@ -15,12 +15,6 @@
 </p>
 
 <p align="center">
-  <a href="https://hevy2garmin-demo.gkos.dev"><strong>Try the live demo</strong></a>
-  &nbsp;·&nbsp;
-  <a href="https://hevy-garmin-explainer.vercel.app"><strong>See how it works</strong></a>
-</p>
-
-<p align="center">
   <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="800">
 </p>
 
@@ -201,7 +195,7 @@ from hevy2garmin.fit import generate_fit
 result = generate_fit(hevy_workout_dict, hr_samples=None, output_path="workout.fit")
 ```
 
-For cloud deployments (Vercel, CI/CD), install with Postgres support:
+To use a Postgres backend, install with Postgres support:
 
 ```bash
 pip install hevy2garmin[cloud]
@@ -228,9 +222,9 @@ If you don't see the Developer section, you need to upgrade to [Hevy Pro](https:
 
 See [`.env.example`](.env.example) for all available env vars.
 
-**Garmin authentication:** Only needs the password for initial login. After that, tokens are cached (in `~/.garminconnect` locally or in Postgres for cloud deploys) and refresh automatically.
+**Garmin authentication:** Only needs the password for initial login. After that, tokens are cached (in `~/.garminconnect`, or in Postgres when `DATABASE_URL` is set) and refresh automatically.
 
-> **Cloud deploys (Vercel):** Garmin blocks automated logins from cloud servers, so hevy2garmin routes the login through a Cloudflare Worker (`hevy2garmin-exchange-di.gkos.workers.dev`) that runs on Cloudflare's edge network. The Worker accepts your email + password from the setup page, completes the login (including 2FA if enabled), and returns a DI OAuth token that hevy2garmin stores in your Postgres database. This happens in a single click from the setup wizard. On the rare occasion Garmin rejects the direct login, the setup page automatically falls back to a "sign in via browser, paste the URL back" flow.
+If Garmin answers 429, the dashboard records a local cooldown, shown on the setup page and the dashboard, and refuses further login attempts until it clears, because retrying resets Garmin's timer.
 
 ## Securing the dashboard
 
@@ -245,7 +239,7 @@ See [`.env.example`](.env.example) for all the related variables.
 
 ## Self-hosting
 
-The Vercel deploy is the quickest way to run hevy2garmin, but it is not the only one. Running it on your own machine — a spare box, a NAS, a Raspberry Pi — keeps your Hevy and Garmin data on hardware you control, and removes the once-a-day cron ceiling that serverless imposes.
+Running it on your own machine — a spare box, a NAS, a Raspberry Pi — keeps your Hevy and Garmin data on hardware you control.
 
 ### Docker Compose (recommended)
 
@@ -264,12 +258,11 @@ It also binds the port to `127.0.0.1` rather than all interfaces, drops all capa
 
 ### Keeping credentials on your own machine
 
-Two settings matter if the point of self-hosting is that nothing leaves your network:
+The Garmin login runs on this host from the setup page, so your Garmin password and MFA code never leave your network.
 
-- **`H2G_DIRECT_GARMIN_LOGIN=true`** — collect your Garmin password and MFA code on your own instance and run the login there, instead of posting them to the hosted exchange worker the Vercel deploy uses. Off by default; the worker path is unchanged unless you set this. Requires a writable home directory, so it is for self-hosted installs only, not serverless.
 The resulting token store lives in `~/.garminconnect` by default (`garmin_token_dir` in `~/.hevy2garmin/config.json`). Back that directory up and you will not have to log in again after a rebuild — which is what the `garmin_auth` volume in the compose file is for.
 
-Your Hevy API key stays local either way.
+Your Hevy API key stays local too.
 
 ### Behind a reverse proxy
 
@@ -300,11 +293,13 @@ handle_path /hevy2garmin/* {
 }
 ```
 
-The app then emits every link, asset, form action, htmx call, redirect and JavaScript-built API URL under that prefix. The proxy does **not** need to rewrite response bodies. Without the header nothing changes, so a root install and the Vercel deploy are unaffected.
+The app then emits every link, asset, form action, htmx call, redirect and JavaScript-built API URL under that prefix. The proxy does **not** need to rewrite response bodies. Without the header nothing changes, so a root install is unaffected.
 
 ### Keeping it in sync
 
-Auto-sync runs on a timer inside the process, so a self-hosted instance can poll as often as you like — enable it and set the interval on the dashboard. This is the main practical difference from the Vercel deploy, where scheduling comes from a platform cron that is limited to once per day on Vercel's Hobby plan.
+Auto-sync runs on a timer inside the process, so a self-hosted instance can poll as often as you like — enable it and set the interval on the dashboard.
+
+An external scheduler can instead call `GET /api/cron/sync` with `Authorization: Bearer $CRON_SECRET`; it syncs one workout per call.
 
 ### Syncing on a Hevy webhook instead of polling
 
@@ -321,10 +316,6 @@ A webhook that synced immediately would be *worse* than polling for watch users,
 Every attempt but the last is merge-only; only the final one falls back to a plain upload, so nothing is left unsynced. Retry state is in memory, so a restart drops it — auto-sync stays the safety net, and is worth leaving enabled at a long interval.
 
 `CRON_SECRET` must be set for the endpoint to work at all — with no secret configured it answers `503` rather than accepting unauthenticated calls, since it is internet-facing and is deliberately exempt from the dashboard password. At most `WEBHOOK_MAX_INFLIGHT` (4) staged syncs run at once; past that a request is acknowledged but not staged, because the ones already running plus auto-sync cover the work.
-
-**On serverless this staging cannot run**, because the function is frozen as soon as it responds and Python on Vercel has no `waitUntil`. The endpoint detects that and does the only safe thing instead: with the watch merge on it defers to the scheduled cron (and logs that it did); with the watch merge off there is nothing to wait for, so it syncs inline — which on Vercel's Hobby plan replaces a once-a-day cron with a sync per workout.
-
-> One caveat for that last case: an inline sync can take longer than Hevy's few-second timeout, and Hevy then retries. On serverless the retry is a *separate process*, so the in-process sync lock cannot serialize the two, and the same workout could upload twice. It only applies with the watch merge off (not the default) on a serverless host; if that is your setup, prefer leaving the webhook unconfigured and relying on cron.
 
 ### Removing duplicates from intervals.icu
 
@@ -429,7 +420,7 @@ or set `merge_activity_types` directly in `config.json`:
 4. Optionally fetches HR data from Garmin daily monitoring and overlays it on the workout
 5. Authenticates with Garmin via [garmin-auth](https://pypi.org/project/garmin-auth/) (self-healing OAuth)
 6. Uploads the FIT file, renames the activity, and sets the description
-7. Tracks synced workouts in SQLite (local) or Postgres (cloud) to avoid duplicates
+7. Tracks synced workouts in SQLite, or Postgres when `DATABASE_URL` is set, to avoid duplicates
 
 ## Exercise Mapping
 

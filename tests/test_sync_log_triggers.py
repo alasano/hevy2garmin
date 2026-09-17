@@ -31,7 +31,6 @@ def recorded(monkeypatch):
 @pytest.fixture
 def client(monkeypatch):
     os.environ.pop("HEVY2GARMIN_SECRET", None)
-    os.environ.pop("DEMO_MODE", None)
     os.environ.pop("CRON_SECRET", None)
     from hevy2garmin import server
 

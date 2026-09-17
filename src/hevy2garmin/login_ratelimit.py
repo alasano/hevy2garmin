@@ -3,7 +3,7 @@
 Protects ``POST /login`` from brute-force guessing. Tracks failed attempts per
 client IP (plus a global counter that blunts distributed guessing from many
 spoofed IPs) and enforces a short lockout that backs off exponentially. State
-lives in the ``app_config`` key-value store so it survives serverless restarts,
+lives in the ``app_config`` key-value store so it survives restarts,
 mirroring :mod:`hevy2garmin.ratelimit`.
 
 Tuned for a single human admin: the legit admin knows the password, so 5 tries

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,7 +23,7 @@ def client_no_secret():
 
 @pytest.fixture
 def client_with_secret():
-    """TestClient with HEVY2GARMIN_SECRET set (cloud mode)."""
+    """TestClient with HEVY2GARMIN_SECRET set (secret set)."""
     with patch.dict(os.environ, {"HEVY2GARMIN_SECRET": "test-secret-123"}):
         from hevy2garmin.server import app
         yield TestClient(app)
@@ -425,26 +425,84 @@ class TestGarminLoginEndpoints:
         comp.assert_called_once_with("sid-1", "123456")
         assert resp.json()["status"] == "success"
 
+    def _cooldown_patches(self, store, cooldown=0):
+        return (
+            patch("hevy2garmin.server.db.get_db", return_value=store),
+            patch("hevy2garmin.server.login_ratelimit.lockout_remaining", return_value=0),
+            patch("hevy2garmin.server.login_ratelimit.record_failure"),
+            patch("hevy2garmin.server.login_ratelimit.clear_failures"),
+            patch("hevy2garmin.server.cooldown_remaining", return_value=cooldown),
+        )
 
-@pytest.fixture
-def client_direct_login():
-    """TestClient with the direct-login flag on (and no HEVY2GARMIN_SECRET).
+    def test_login_begin_rate_limited_records_cooldown(self, client_with_secret) -> None:
+        store = MagicMock()
+        get_db, lockout, rec_fail, clr_fail, cooldown = self._cooldown_patches(store)
+        with get_db, lockout, rec_fail as failed, clr_fail, cooldown, \
+             patch("hevy2garmin.server.record_rate_limit") as record, \
+             patch("hevy2garmin.garmin_login.begin",
+                   return_value={"status": "rate_limited", "message": "429"}):
+            resp = client_with_secret.post(
+                "/api/garmin-login",
+                json={"email": "e@x.com", "password": "pw"},
+                cookies={"h2g_auth": "test-secret-123"},
+            )
+        assert resp.json()["status"] == "rate_limited"
+        record.assert_called_once_with(store)
+        failed.assert_not_called()  # a Garmin throttle is not a credential failure
 
-    The env patch is honored because _direct_garmin_login() is evaluated at
-    request time (inside the /setup route), not at module import — so the
-    cached server module doesn't need reloading.
-    """
-    with patch.dict(os.environ, {"H2G_DIRECT_GARMIN_LOGIN": "true"}, clear=False):
-        os.environ.pop("HEVY2GARMIN_SECRET", None)
-        from hevy2garmin.server import app
-        yield TestClient(app)
+    def test_login_begin_success_clears_cooldown(self, client_with_secret) -> None:
+        store = MagicMock()
+        get_db, lockout, rec_fail, clr_fail, cooldown = self._cooldown_patches(store)
+        with get_db, lockout, rec_fail, clr_fail, cooldown, \
+             patch("hevy2garmin.server.clear_rate_limit") as clear, \
+             patch("hevy2garmin.garmin_login.begin",
+                   return_value={"status": "success", "display_name": "Jane"}):
+            client_with_secret.post(
+                "/api/garmin-login",
+                json={"email": "e@x.com", "password": "pw"},
+                cookies={"h2g_auth": "test-secret-123"},
+            )
+        clear.assert_called_once_with(store)
 
+    def test_login_begin_skips_garmin_while_cooling_down(self, client_with_secret) -> None:
+        """Retrying resets Garmin's timer, so a cooling-down login never reaches Garmin."""
+        store = MagicMock()
+        get_db, lockout, rec_fail, clr_fail, cooldown = self._cooldown_patches(store, cooldown=600)
+        with get_db, lockout, rec_fail as failed, clr_fail, cooldown, \
+             patch("hevy2garmin.garmin_login.begin") as begin:
+            resp = client_with_secret.post(
+                "/api/garmin-login",
+                json={"email": "e@x.com", "password": "pw"},
+                cookies={"h2g_auth": "test-secret-123"},
+            )
+        assert resp.status_code == 429
+        assert resp.json()["status"] == "rate_limited"
+        begin.assert_not_called()
+        failed.assert_not_called()
 
-class TestDirectLoginFlag:
-    def test_setup_renders_direct_flag_on(self, client_direct_login) -> None:
-        resp = client_direct_login.get("/setup")
-        assert "const DIRECT_LOGIN = true" in resp.text
+    def test_login_begin_without_a_store_skips_the_gate(self, client_with_secret) -> None:
+        """A DB outage must never block setup: no store, no gate, straight to Garmin."""
+        with patch("hevy2garmin.server.db.get_db", side_effect=RuntimeError("db down")), \
+             patch("hevy2garmin.garmin_login.begin",
+                   return_value={"status": "success", "display_name": "Jane"}) as begin:
+            resp = client_with_secret.post(
+                "/api/garmin-login",
+                json={"email": "e@x.com", "password": "pw"},
+                cookies={"h2g_auth": "test-secret-123"},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "success"
+        begin.assert_called_once()
 
-    def test_setup_renders_direct_flag_off(self, client_no_secret) -> None:
-        resp = client_no_secret.get("/setup")
-        assert "const DIRECT_LOGIN = false" in resp.text
+    def test_login_mfa_success_clears_cooldown(self, client_with_secret) -> None:
+        store = MagicMock()
+        with patch("hevy2garmin.server.db.get_db", return_value=store), \
+             patch("hevy2garmin.server.clear_rate_limit") as clear, \
+             patch("hevy2garmin.garmin_login.complete",
+                   return_value={"status": "success", "display_name": "Jane"}):
+            client_with_secret.post(
+                "/api/garmin-login-mfa",
+                json={"session_id": "sid-1", "code": "123456"},
+                cookies={"h2g_auth": "test-secret-123"},
+            )
+        clear.assert_called_once_with(store)

@@ -8,7 +8,7 @@ from datetime import datetime
 from hevy2garmin._isotime import parse_iso
 from pathlib import Path
 
-from hevy2garmin.db_interface import Database, NoWritableDatabaseError
+from hevy2garmin.db_interface import Database
 
 
 def _ts_newer(new_ts: str, old_ts: str) -> bool:
@@ -30,18 +30,7 @@ class SQLiteDatabase(Database):
         self.db_path = Path(db_path)
 
     def _get_conn(self) -> sqlite3.Connection:
-        try:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            # Serverless (Vercel/Lambda) home is read-only — the cryptic
-            # FileNotFoundError/OSError here is what users saw as a blank
-            # dashboard / 500 on deploy (#145). Surface an actionable message.
-            raise NoWritableDatabaseError(
-                "Cannot create a local SQLite database under ~/.hevy2garmin on "
-                "this read-only filesystem. Serverless deployments need Postgres: "
-                "add a Neon database (Vercel → Storage) so DATABASE_URL / "
-                "POSTGRES_URL is set, then redeploy."
-            ) from e
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path))
         conn.execute("""
             CREATE TABLE IF NOT EXISTS synced_workouts (
