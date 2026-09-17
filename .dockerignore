@@ -12,12 +12,6 @@ venv
 tests
 docs
 scripts
-typescript
-universal
-worker
-worker-di
-api
-node_modules
 *.md
 !README.md
 .env

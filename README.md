@@ -49,85 +49,11 @@ Hevy is great for tracking gym workouts but doesn't sync to Garmin. This tool br
 
 - **[Hevy Pro](https://hevyapp.com) subscription** (required for API access)
 - A [Garmin Connect](https://connect.garmin.com) account
-- Python 3.10+ (for local install only, not needed for the Vercel deploy)
+- Python 3.10+
 
 ## Quick Start
 
 Pick the option that fits you best:
-
-### Vercel Deploy (no coding required)
-
-Deploy from your phone or computer in about 5 minutes. No terminal or coding needed.
-
-> **You need [Hevy Pro](https://hevyapp.com) for API access.** Free Hevy accounts cannot use hevy2garmin.
-
-**Step 1: Get your Hevy API key**
-
-Open [hevy.com/settings](https://hevy.com/settings), scroll to **Developer** (Hevy recently renamed this section from **Integrations & API**), click **Generate API Key**, and copy it. If you don't see this section, you need to upgrade to Hevy Pro.
-
-**Step 2: Create a free GitHub account** (skip if you already have one)
-
-Sign up at [github.com](https://github.com/signup). You'll use this to sign into Vercel too.
-
-**Step 3: Create a GitHub access token**
-
-This token lets hevy2garmin set up automatic syncing on your behalf. Open [this link](https://github.com/settings/tokens/new?scopes=repo,workflow&description=hevy2garmin) (sign in if prompted):
-
-1. Set **Expiration** to **No expiration** (otherwise auto-sync stops when it expires)
-2. Scroll to the bottom, click **Generate token**
-3. **Copy the token immediately** (starts with `ghp_`). GitHub only shows it once.
-
-**Step 4: Fork the repo**
-
-[Fork hevy2garmin on GitHub](https://github.com/drkostas/hevy2garmin/fork) -- click the green **Create fork** button. This gives you your own copy that stays linked to the original, so you can pull updates later with one click.
-
-**Step 5: Deploy to Vercel**
-
-1. Go to [vercel.com/new](https://vercel.com/new) and sign in with GitHub
-2. Find **hevy2garmin** in your repo list and click **Import**. If your fork isn't listed even though GitHub shows it, click **Adjust GitHub App Permissions** (or **Configure GitHub App**) and grant Vercel access to the repo, then it will appear.
-3. **Add a database (required).** If you see an **Integrations** or **Storage** section during import, add **Neon Postgres** (it's free). This is where your sync history lives. If you don't see it during import, that's fine: deploy first, then open your project's **Storage** tab, add **Neon Postgres**, and redeploy. A serverless host has a read-only filesystem, so with no database the app can't save anything and shows an "internal server error".
-4. **Environment Variables.** Vercel does not pre-fill these. The form shows an empty field with a placeholder like `EXAMPLE_NAME`. Add each of the four below as its own variable: type the name in **Key**, the value in **Value**, then click **Add More** for the next one.
-
-| Key | What to paste |
-|-------|--------------|
-| `HEVY_API_KEY` | The API key from step 1 |
-| `GARMIN_EMAIL` | Your Garmin Connect email |
-| `GARMIN_PASSWORD` | Your Garmin Connect password |
-| `GITHUB_PAT` | The token from step 3 |
-
-5. Click **Deploy** and wait about a minute for it to build. If the deployed page shows an "internal server error", it almost always means the database step was skipped: add **Neon Postgres** from the **Storage** tab, then redeploy.
-
-**Step 6: Connect Garmin**
-
-Click **Continue to Dashboard**, then **Visit** to open your app. Bookmark this URL -- it's your dashboard.
-
-On the setup page, enter your Garmin email and password and click **Connect**.
-
-- If your Garmin account **does not** have 2FA enabled, you're connected in a second. That's it.
-- If your Garmin account **has 2FA enabled**, Garmin emails you a 6-digit code. A code input appears on the page, paste the code, click **Verify**. Done.
-
-Then click **Save & Continue**.
-
-Garmin blocks automated logins from cloud servers (AWS, Azure, Vercel), so hevy2garmin routes the login through a Cloudflare Worker that runs on Cloudflare's edge network. Garmin accepts those IPs, so the whole flow happens in a single click from the dashboard -- no browser tab switching, no URL copying.
-
-> **Fallback for edge cases:** on the rare occasion Garmin doesn't accept the direct login (most often when the account has an unusual security configuration), the setup page automatically reveals the old "Sign into Garmin in a new tab and paste the URL back" flow as a safety net. You don't need to do anything differently -- just follow the instructions the page shows you.
-
-**Step 7: Sync your workouts**
-
-You're on the dashboard. Click **Sync All Workouts** to backfill your history. The app syncs one workout at a time (you can close the page and come back, it picks up where it left off).
-
-> **EU users:** If you see an upload consent error, go to [Garmin Connect Settings](https://connect.garmin.com/modern/settings) > scroll to **Data** > enable **Device Upload**. This is a one-time Garmin GDPR requirement.
-
-To keep future workouts syncing automatically, toggle **Auto-sync** on the dashboard. This creates a background job that syncs new workouts every 2 hours.
-
-> **Sync timing:** hevy2garmin waits `sync.grace_period_minutes` (default 120)
-> after a workout ends before syncing it automatically, so your Garmin watch
-> activity can land first and it merges into one activity instead of creating a
-> duplicate. On Vercel the default cron runs once a day; if your plan allows,
-> lower the cron interval (e.g. every few hours) so recently-finished workouts
-> sync the same day. Manual "Sync now" always ignores the grace period.
-
-**That's it.** Check [Garmin Connect](https://connect.garmin.com/modern/activities) to see your workouts with proper exercise names, sets, reps, and weights.
 
 ### Web Dashboard (local install)
 
@@ -283,20 +209,6 @@ pip install hevy2garmin[cloud]
 
 This adds `psycopg2-binary` and enables automatic Postgres backend detection via `DATABASE_URL`.
 
-### TypeScript / npm
-
-The same logic is available as a TypeScript package for Node, serverless functions, and Vercel crons, so you can run the sync without a Python runtime.
-
-```bash
-npm install hevy2garmin
-```
-
-```ts
-import { generateFit, HevyClient } from "hevy2garmin";
-```
-
-It lives alongside the Python package in the [`typescript/`](typescript) folder of this repo and is published to npm under the same name. Setup, the full API, and examples are in the [TypeScript README](typescript/README.md). The Python package on PyPI stays fully supported.
-
 ## Getting Your Hevy API Key
 
 > **Hevy Pro is required.** API access is not available on the free plan.
@@ -438,23 +350,6 @@ sudo chown -R 999:999 ~/.hevy2garmin ~/.garminconnect
 The paths inside the container are unchanged, so nothing needs moving.
 
 ## Updating
-
-### Vercel (fork-based deploy)
-
-Your Vercel project is linked to your GitHub fork. To get the latest version:
-
-1. Go to your fork on GitHub (e.g. `github.com/your-username/hevy2garmin`)
-2. Click **Sync fork** → **Update branch** (this pulls the latest changes from the original repo)
-3. Vercel auto-deploys when your fork updates. Wait ~1 minute for the build to finish.
-4. Open your dashboard URL and reconnect Garmin if prompted (token format may change between versions)
-
-**If you deployed before April 2026** using the old one-click button, your repo may be a standalone copy instead of a fork ("Sync fork" button won't appear). To migrate:
-
-1. [Fork hevy2garmin](https://github.com/drkostas/hevy2garmin/fork) to your GitHub account
-2. In Vercel dashboard → your project → **Settings** → **Git** → disconnect the old repo
-3. Connect the new fork → redeploy
-4. Your Neon database and env vars stay intact (they're on the Vercel project, not the repo)
-5. You can delete the old standalone copy from GitHub to avoid having two "hevy2garmin" repos
 
 ### pip
 

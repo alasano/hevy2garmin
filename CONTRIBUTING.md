@@ -81,4 +81,4 @@ Open an issue at https://github.com/drkostas/hevy2garmin/issues. Include:
 - What you ran
 - What you expected
 - What actually happened (with logs if possible)
-- Your environment (local / Docker / Vercel)
+- Your environment (local / Docker)
