@@ -81,16 +81,99 @@ class TestFindMatchingActivity:
         assert match["activityId"] == 12345
 
     def test_low_overlap_rejected(self):
-        """Activity with only 50% overlap is below 70% threshold → no match."""
+        """10 of the recording's 25 minutes overlap (40% of the shorter) → no match."""
         from hevy2garmin.garmin import find_matching_garmin_activity
 
         client = MagicMock()
-        # Activity starts 22 min late, only ~50% overlap with 45-min hevy workout
+        # Starts 15 min early, inside the drift limit, so only the overlap can reject it.
         client.get_activities_by_date.return_value = [
-            _make_garmin_activity(start="2026-03-15 18:22:00", duration_s=23 * 60),
+            _make_garmin_activity(start="2026-03-15 17:45:00", duration_s=25 * 60),
         ]
         match = find_matching_garmin_activity(client, HEVY_WORKOUT)
         assert match is None
+
+    def test_recording_inside_a_workout_finished_late_matches(self):
+        """Watch stopped after 60 min, Hevy finished 12 h later: the watch covers 8% of it.
+
+        With a 17 min start drift the ranking score is negative, and the only
+        candidate must still win.
+        """
+        from hevy2garmin.garmin import find_matching_garmin_activity
+
+        client = MagicMock()
+        client.get_activities_by_date.return_value = [
+            _make_garmin_activity(start="2026-03-15 18:17:00", duration_s=60 * 60),
+        ]
+        late = {**HEVY_WORKOUT, "end_time": "2026-03-16T06:00:00+00:00"}
+        match = find_matching_garmin_activity(client, late)
+        assert match is not None and match["activityId"] == 12345
+
+    def test_workout_inside_a_recording_left_running_matches(self):
+        from hevy2garmin.garmin import find_matching_garmin_activity
+
+        client = MagicMock()
+        client.get_activities_by_date.return_value = [
+            _make_garmin_activity(start="2026-03-15 17:58:00", duration_s=5 * 3600),
+        ]
+        match = find_matching_garmin_activity(client, HEVY_WORKOUT)
+        assert match is not None and match["activityId"] == 12345
+
+    @pytest.mark.parametrize("stray_first", [True, False])
+    def test_stray_short_recording_does_not_beat_the_real_one(self, stray_first):
+        """Both lie inside the workout; the closer start must not decide."""
+        from hevy2garmin.garmin import find_matching_garmin_activity
+
+        stray = _make_garmin_activity(activity_id=1, start="2026-03-15 18:01:00", duration_s=2 * 60)
+        real = _make_garmin_activity(activity_id=2, start="2026-03-15 18:04:00", duration_s=40 * 60)
+        client = MagicMock()
+        client.get_activities_by_date.return_value = [stray, real] if stray_first else [real, stray]
+        match = find_matching_garmin_activity(client, HEVY_WORKOUT)
+        assert match["activityId"] == 2
+
+    def test_lone_stray_short_recording_is_not_a_match(self):
+        """A webhook attempt can run before the real recording reaches Garmin."""
+        from hevy2garmin.garmin import find_matching_garmin_activity
+
+        client = MagicMock()
+        client.get_activities_by_date.return_value = [
+            _make_garmin_activity(start="2026-03-15 18:01:00", duration_s=2 * 60),
+        ]
+        assert find_matching_garmin_activity(client, HEVY_WORKOUT) is None
+
+    def test_short_workout_still_matches_its_recording(self):
+        """An 8 min workout cannot overlap anything for ten minutes."""
+        from hevy2garmin.garmin import find_matching_garmin_activity
+
+        client = MagicMock()
+        client.get_activities_by_date.return_value = [
+            _make_garmin_activity(start="2026-03-15 18:00:30", duration_s=7 * 60),
+        ]
+        short = {**HEVY_WORKOUT, "end_time": "2026-03-15T18:08:00+00:00"}
+        match = find_matching_garmin_activity(client, short)
+        assert match is not None and match["activityId"] == 12345
+
+    def test_evening_workout_is_searched_on_its_local_date(self):
+        """02:30 UTC is the evening before in the Americas, where Garmin files the recording."""
+        from hevy2garmin.garmin import find_matching_garmin_activity
+
+        client = MagicMock()
+        client.get_activities_by_date.return_value = []
+        evening = {
+            **HEVY_WORKOUT,
+            "start_time": "2026-03-16T02:30:00+00:00",
+            "end_time": "2026-03-16T03:30:00+00:00",
+        }
+        find_matching_garmin_activity(client, evening)
+        client.get_activities_by_date.assert_called_once_with("2026-03-15", "2026-03-17")
+
+    def test_failed_listing_is_not_no_match(self):
+        """A caller told "no match" uploads next to a recording it could not see."""
+        from hevy2garmin.garmin import find_matching_garmin_activity
+
+        client = MagicMock()
+        client.get_activities_by_date.side_effect = RuntimeError("Garmin unreachable")
+        with pytest.raises(RuntimeError, match="Garmin unreachable"):
+            find_matching_garmin_activity(client, HEVY_WORKOUT)
 
     def test_wrong_type_rejected(self):
         """Running activity with perfect overlap → no match."""
@@ -438,6 +521,22 @@ class TestAttemptMerge:
         assert result.merged is False
         assert "Circuit breaker" in result.fallback_reason
 
+    @patch("hevy2garmin.merge.find_matching_garmin_activity")
+    @patch("hevy2garmin.merge.get_activity_exercise_sets")
+    @patch("hevy2garmin.merge.push_exercise_sets")
+    def test_tripped_breaker_fails_a_watch_merge_instead_of_falling_back(self, mock_push, mock_get_sets, mock_find):
+        """The fourth watch workout of a run must not be renamed without sets either."""
+        watch = _make_garmin_activity()
+        watch["manufacturer"] = "GARMIN"
+        mock_find.return_value = watch
+        mock_get_sets.return_value = {"exerciseSets": []}
+        mock_push.side_effect = RuntimeError("PUT failed")
+
+        for _ in range(4):
+            with pytest.raises(RuntimeError):
+                attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
+        assert mock_push.call_count == 3
+
 
 @patch("hevy2garmin.merge.find_matching_garmin_activity")
 @patch("hevy2garmin.merge.push_exercise_sets")
@@ -601,7 +700,7 @@ def test_non_subcategory_error_is_not_retried(mock_push, mock_get, mock_find, _s
     stripped-names retry."""
     reset_circuit_breaker()
     act = _make_garmin_activity()
-    act["manufacturer"] = "GARMIN"
+    act["manufacturer"] = "DEVELOPMENT"
     mock_find.return_value = act
     mock_get.return_value = {"exerciseSets": []}
     mock_push.side_effect = RuntimeError("connection reset by peer")
@@ -610,6 +709,25 @@ def test_non_subcategory_error_is_not_retried(mock_push, mock_get, mock_find, _s
 
     assert result.merged is False
     assert "PUT failed" in result.fallback_reason
+    mock_push.assert_called_once()   # no retry
+
+
+@patch("hevy2garmin.merge.time.sleep")
+@patch("hevy2garmin.merge.find_matching_garmin_activity")
+@patch("hevy2garmin.merge.get_activity_exercise_sets")
+@patch("hevy2garmin.merge.push_exercise_sets")
+def test_failed_push_into_a_watch_activity_fails_the_workout(mock_push, mock_get, mock_find, _sleep):
+    """Reporting "not merged" sends a full sync to its start-time fallback, which
+    finds this same watch activity, renames it without sets and records an upload."""
+    reset_circuit_breaker()
+    act = _make_garmin_activity()
+    act["manufacturer"] = "GARMIN"
+    mock_find.return_value = act
+    mock_get.return_value = {"exerciseSets": []}
+    mock_push.side_effect = RuntimeError("connection reset by peer")
+
+    with pytest.raises(RuntimeError, match="connection reset by peer"):
+        attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
     mock_push.assert_called_once()   # no retry
 
 
@@ -672,6 +790,35 @@ class TestSyncIntegration:
         h.get_workout_count.return_value = 2
         h.get_workouts.return_value = {"workouts": self.WORKOUTS, "page_count": 1}
         return h
+
+    @patch("hevy2garmin.sync.find_activity_by_start_time")
+    @patch("hevy2garmin.sync.upload_fit")
+    @patch("hevy2garmin.sync.generate_fit")
+    @patch("hevy2garmin.sync.attempt_merge")
+    def test_merge_only_without_a_match_touches_nothing(self, mock_merge, mock_fit, mock_upload, mock_find):
+        """The webhook's staged sync: no watch activity yet means wait, never upload.
+
+        This return is all that stands between a webhook attempt and a plain FIT
+        uploaded next to a watch activity that arrives a few minutes later.
+        """
+        from hevy2garmin.sync import sync_one_workout
+
+        mock_merge.return_value = MergeResult(merged=False, fallback_reason="No matching Garmin activity found")
+        database = MagicMock()
+        database.get_pending.return_value = None
+        client = MagicMock()
+
+        result = sync_one_workout(
+            self.WORKOUTS[0],
+            cfg={"hevy_api_key": "t", "merge_mode": True},
+            garmin_client=client,
+            merge_only=True,
+            database=database,
+        )
+
+        assert result.status == "merge_pending"
+        for untouched in (mock_fit, mock_upload, mock_find, database.claim_pending, database.mark_synced, client.delete_activity):
+            untouched.assert_not_called()
 
     @patch("hevy2garmin.sync.db")
     @patch("hevy2garmin.sync.get_client")

@@ -243,10 +243,9 @@ def find_activity_by_start_time(
     date_from = (target_naive - timedelta(days=1)).date().isoformat()
     date_to = (target_naive + timedelta(days=1)).date().isoformat()
 
-    try:
-        activities = _limiter.call(client.get_activities_by_date, date_from, date_to)
-    except Exception:
-        return None
+    # A failed listing must not read as "nothing there": the caller would upload
+    # a second activity next to the one it could not see.
+    activities = _limiter.call(client.get_activities_by_date, date_from, date_to)
 
     excluded = {str(activity_id) for activity_id in (exclude_activity_ids or [])}
     for act in activities:
@@ -300,6 +299,9 @@ def upload_image(client: Garmin, activity_id: int, image_bytes: bytes, filename:
     logger.info("  Image uploaded (%dKB)", len(image_bytes) // 1024)
 
 
+_MIN_OVERLAP_SECONDS = 600
+
+
 def find_matching_garmin_activity(
     client: Garmin,
     hevy_workout: dict,
@@ -337,14 +339,13 @@ def find_matching_garmin_activity(
     if hevy_duration <= 0:
         return None
 
-    # Query activities in a window around the workout
-    search_start = (hevy_start - timedelta(hours=2)).date().isoformat()
-    search_end = (hevy_end + timedelta(hours=2)).date().isoformat()
-    try:
-        activities = _limiter.call(client.get_activities_by_date, search_start, search_end)
-    except Exception as e:
-        logger.warning("Could not query Garmin activities for merge: %s", e)
-        return None
+    # Garmin files an activity under its local date, these are UTC: search the
+    # workout's dates ±1 day so an evening workout is not looked for a day late.
+    # A failed listing raises rather than reading as "no match", which would let
+    # the caller treat a watch recording it could not see as absent.
+    search_start = (hevy_start - timedelta(days=1)).date().isoformat()
+    search_end = (hevy_end + timedelta(days=1)).date().isoformat()
+    activities = _limiter.call(client.get_activities_by_date, search_start, search_end)
 
     best_score = 0.0
     best: dict | None = None
@@ -383,9 +384,18 @@ def find_matching_garmin_activity(
         overlap_start = max(hevy_start.replace(tzinfo=timezone.utc), act_start.replace(tzinfo=timezone.utc))
         overlap_end = min(hevy_end.replace(tzinfo=timezone.utc), act_end.replace(tzinfo=timezone.utc))
         overlap_s = max(0.0, (overlap_end - overlap_start).total_seconds())
-        overlap_pct = overlap_s / hevy_duration
+        # Gate on the shorter of the two, so a recording that lies inside the
+        # other passes whichever one ran long (a Hevy workout finished late).
+        overlap_pct = overlap_s / min(hevy_duration, act_duration)
 
         if overlap_pct < overlap_threshold:
+            continue
+
+        # A stray recording of a minute or two lies inside the workout as well,
+        # and while the real one has not reached Garmin yet it is the only
+        # candidate. Ask for ten minutes of overlap, or for a workout too short
+        # for that, the same share of it the threshold always required.
+        if overlap_s < min(_MIN_OVERLAP_SECONDS, overlap_threshold * hevy_duration):
             continue
 
         # Check start drift
@@ -394,16 +404,20 @@ def find_matching_garmin_activity(
         if drift_min > max_drift_minutes:
             continue
 
-        # Score: overlap dominates, drift is a small penalty
-        score = (overlap_pct * 100) - (drift_min * 0.5)
-        if score > best_score:
+        # Rank on how much of the workout is covered, not on the gate's share:
+        # every contained recording gates at 100%, and a stray two-minute one
+        # would otherwise win on drift alone. The score can be negative for a
+        # workout left running for hours, so the first candidate always counts.
+        score = (overlap_s / hevy_duration * 100) - (drift_min * 0.5)
+        if best is None or score > best_score:
             best_score = score
             best = act
+            best_overlap, best_drift = overlap_pct, drift_min
 
     if best:
         logger.info(
             "Merge match: Garmin activity %s (overlap %.0f%%, drift %.1fmin)",
-            best.get("activityId"), best_score, 0,
+            best.get("activityId"), best_overlap * 100, best_drift,
         )
     return best
 

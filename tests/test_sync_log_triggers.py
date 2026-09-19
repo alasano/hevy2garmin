@@ -5,6 +5,10 @@ the workouts page and the cron endpoint all ran silently, so a gap on /history
 was indistinguishable from a sync that had stopped running — the exact question
 the log exists to answer. The trigger label is what makes the row useful, so
 each entry point is asserted by its own label.
+
+The one exception is a merge-only attempt that is still waiting for the watch
+activity: the webhook polls up to WEBHOOK_MAX_ATTEMPTS times per workout, and a
+row per poll would bury the rows that say what synced.
 """
 
 from __future__ import annotations
@@ -90,11 +94,16 @@ class TestFailuresAreDistinguishableFromNoWork:
 
     def test_in_flight_statuses_are_not_counted_as_failures(self, client, recorded, monkeypatch):
         """needs_review / processing / deferred are unfinished, not failed."""
-        for status in ("needs_review", "processing", "deferred", "merge_pending"):
+        for status in ("needs_review", "processing", "deferred"):
             recorded.clear()
             _stub_sync_one(monkeypatch, {"synced": 0, status: 1, "done": False})
             client.post("/api/sync-one")
             assert recorded == [({"synced": 0, "failed": 0}, "manual (one)")], status
+
+    def test_a_merge_only_poll_still_waiting_leaves_no_row(self, client, recorded, monkeypatch):
+        _stub_sync_one(monkeypatch, {"synced": 0, "merge_pending": 1, "done": False})
+        client.post("/api/sync-one?merge_only=true")
+        assert recorded == []
 
     def test_a_raising_sync_is_recorded_before_it_propagates(self, client, recorded, monkeypatch):
         from hevy2garmin import server
@@ -158,10 +167,20 @@ class TestLockIsStillHeldAndReleased:
     def test_busy_response_records_nothing(self, client, recorded, monkeypatch):
         from hevy2garmin import server
 
-        monkeypatch.setattr(server, "_acquire_sync_lock", lambda: False)
+        monkeypatch.setattr(server, "_acquire_sync_lock", lambda **kw: False)
         resp = client.post("/api/sync-one")
         assert json.loads(resp.content)["busy"] is True
         assert recorded == []
+
+    def test_only_a_merge_only_poll_gives_up_the_right_to_force_the_lock(self, client, monkeypatch):
+        """The webhook polls for hours and must not take the lock from a long, live sync."""
+        from hevy2garmin import server
+
+        asked: list[bool] = []
+        monkeypatch.setattr(server, "_acquire_sync_lock", lambda *, force=True: asked.append(force) or False)
+        client.post("/api/sync-one?merge_only=true")
+        client.post("/api/sync-one")
+        assert asked == [False, True]
 
     def test_lock_is_released_even_when_the_sync_raises(self, client, recorded, monkeypatch):
         from hevy2garmin import server

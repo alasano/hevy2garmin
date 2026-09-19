@@ -397,6 +397,45 @@ class TestSyncOneWorkout:
         assert result.activity_id == 444
         mock_db.mark_synced.assert_called_once()
 
+    def test_watch_replacement_still_syncs_when_the_in_place_merge_raises(
+        self, sample_workout: dict
+    ) -> None:
+        # Under the merge strategy a failed push raises so the merge is retried.
+        # Here it is only the #244 fallback: the workout must still sync as a
+        # fresh upload beside the untouched watch copy, not fail.
+        store = MagicMock()
+        store.get_pending.return_value = None
+        garmin = MagicMock()
+        with patch("hevy2garmin.sync.attempt_merge") as mock_merge, \
+             patch("hevy2garmin.hr.backup_activity_hr", return_value=[]), \
+             patch("hevy2garmin.sync.generate_fit", return_value={"exercises": 2, "total_sets": 5, "calories": 100, "avg_hr": 90}), \
+             patch("hevy2garmin.sync.find_activity_by_start_time") as find_existing, \
+             patch("hevy2garmin.sync.upload_fit", return_value={"activity_id": 555}) as upload_fit:
+            mock_merge.side_effect = [
+                MergeResult(
+                    merged=False,
+                    force_fresh_upload=True,
+                    delete_after_upload=444,
+                    fallback_reason="watch replacement",
+                ),
+                RuntimeError("PUT exerciseSets failed"),
+            ]
+
+            sync_one_workout(
+                sample_workout,
+                cfg={
+                    "merge_mode": True,
+                    "merge_watch_strategy": "replace",
+                    "hr_fusion": {"enabled": False},
+                },
+                garmin_client=garmin,
+                database=store,
+            )
+
+        upload_fit.assert_called_once()
+        find_existing.assert_not_called()
+        garmin.delete_activity.assert_not_called()
+
     def test_description_disabled_skips_set_description(self, sample_workout: dict) -> None:
         with patch("hevy2garmin.sync.db") as mock_db, \
              patch("hevy2garmin.sync.attempt_merge", return_value=MergeResult(merged=False, fallback_reason="No match")), \

@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- The Hevy webhook's staged sync is merge-only on every attempt and now covers the whole sync grace period: `WEBHOOK_RETRY_INTERVAL_SECONDS` defaults to 300 and `WEBHOOK_MAX_ATTEMPTS` to 24 (was 600 and 3). The last attempt used to fall back to a plain FIT upload 25 minutes after the save, which left a duplicate next to a watch activity that reached Garmin Connect later and marked the workout synced so it never merged. A workout that does not merge in that time is left to auto-sync.
+- A merge-only attempt that is still waiting for the watch activity no longer writes a sync log row, so the webhook's polling does not push real syncs off the dashboard.
+
+### Fixed
+- A workout finished late in Hevy now merges into its watch activity. The 70% overlap was measured against the Hevy workout alone, so a watch activity lying entirely inside a much longer Hevy workout was rejected; it is now measured against the shorter of the two. Candidates are still ranked by how much of the workout they cover, and the overlap must last ten minutes (less for a shorter workout) so a stray recording of a minute or two cannot take the merge.
+- The merge search looks at the workout's dates plus and minus one day. It used UTC dates with a two-hour margin, so an evening workout in the Americas was searched for a day late and its watch activity never found.
+- A failed Garmin activity listing is no longer read as "no matching activity" or "nothing uploaded yet". Both could end in a plain FIT uploaded next to a watch activity, or a watch activity renamed and recorded as an upload without its sets. The error now stops that workout's sync and it is retried.
+- An error during a merge-only attempt no longer hides the workout from Sync Now and cron until the next restart.
+- Sync Now no longer loops without pause when the only unsynced workout was skipped after an error.
+- A failed push of the sets into a watch activity under the merge strategy now fails that workout's sync so it is retried. It used to fall through to the start-time check, which found the same watch activity, renamed it without sets and recorded it as an upload.
+- Auto-sync no longer stops until restart when a sync that ran longer than the lock timeout had its lock force-released by another caller, and the webhook's merge-only polls never force-release the lock.
+- Sync Now reports a workout that was skipped after an error instead of "Everything is already synced".
+- The merge match log line reports the real overlap and start drift.
+
 ## [0.9.0] - 2026-07-28
 
 ### Added

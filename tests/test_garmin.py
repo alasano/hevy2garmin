@@ -91,12 +91,13 @@ class TestFindActivityByStartTime:
         result = find_activity_by_start_time(client, "not-a-date")
         assert result is None
 
-    def test_api_error_returns_none(self) -> None:
+    def test_api_error_is_not_nothing_found(self) -> None:
+        """A caller told "nothing there" uploads next to an activity it could not see."""
         client = MagicMock()
         with patch("hevy2garmin.garmin._limiter") as mock_limiter:
             mock_limiter.call.side_effect = Exception("API error")
-            result = find_activity_by_start_time(client, "2026-04-01T20:00:00+00:00")
-            assert result is None
+            with pytest.raises(Exception, match="API error"):
+                find_activity_by_start_time(client, "2026-04-01T20:00:00+00:00")
 
     def test_excludes_pre_upload_activity(self) -> None:
         client = MagicMock()

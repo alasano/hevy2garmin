@@ -221,7 +221,7 @@
                     <div class="form-group">
                         <label class="form-label" for="merge_overlap_pct">Overlap Threshold (%)</label>
                         <input class="form-input" type="number" id="merge_overlap_pct" name="merge_overlap_pct" value="{{ config.get('merge_overlap_pct', 70) }}" min="50" max="95" step="5">
-                        <div class="form-hint">Minimum temporal overlap between watch and Hevy workout (default 70%)</div>
+                        <div class="form-hint">Minimum overlap between the watch activity and the Hevy workout, as a share of the shorter of the two (default 70%)</div>
                     </div>
                     <div class="form-group">
                         <label class="form-label" for="merge_max_drift_min">Start Time Tolerance (minutes)</label>

@@ -310,10 +310,10 @@ A webhook that synced immediately would be *worse* than polling for watch users,
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WEBHOOK_DELAY_SECONDS` | `300` | Wait this long before the first attempt |
-| `WEBHOOK_RETRY_INTERVAL_SECONDS` | `600` | Gap between attempts |
-| `WEBHOOK_MAX_ATTEMPTS` | `3` | Attempts before giving up |
+| `WEBHOOK_RETRY_INTERVAL_SECONDS` | `300` | Gap between attempts |
+| `WEBHOOK_MAX_ATTEMPTS` | `24` | Attempts before giving up |
 
-Every attempt but the last is merge-only; only the final one falls back to a plain upload, so nothing is left unsynced. Retry state is in memory, so a restart drops it — auto-sync stays the safety net, and is worth leaving enabled at a long interval.
+Every attempt is merge-only: the defaults look for the watch activity every five minutes for two hours, the same span as the sync grace period, and never upload a plain FIT, because a watch activity that arrives afterwards would be a duplicate of a workout already marked synced. A workout that has not merged by then is left to auto-sync, which decides between merge and upload once the grace period is over, so keep auto-sync enabled. A Garmin or Hevy error ends the staged sync for that workout and auto-sync picks it up. Retry state is in memory, so a restart drops it. The polling lasts delay plus (attempts minus one) times interval. If you make that shorter than your grace period, a watch activity that arrives late is still merged, by auto-sync after the grace period instead of within minutes.
 
 `CRON_SECRET` must be set for the endpoint to work at all — with no secret configured it answers `503` rather than accepting unauthenticated calls, since it is internet-facing and is deliberately exempt from the dashboard password. At most `WEBHOOK_MAX_INFLIGHT` (4) staged syncs run at once; past that a request is acknowledged but not staged, because the ones already running plus auto-sync cover the work.
 
@@ -394,7 +394,7 @@ If you start a **Strength Training** activity on your Garmin watch when you hit 
 - **Correct Strava timestamps** (watch-synced activities use the real time, not upload time)
 - **Single activity** on Garmin (no duplicate)
 
-If no matching watch activity is found, hevy2garmin falls back to the default flow automatically. Matching requires 70% temporal overlap with a Strength Training activity within 20 minutes of the Hevy workout start time.
+If no matching watch activity is found, hevy2garmin falls back to the default flow automatically. Matching requires a Strength Training activity that starts within 20 minutes of the Hevy workout and overlaps it by 70% of whichever of the two is shorter, so a workout you finished late in Hevy, or a watch you left running, still matches. The overlap must also last ten minutes (less for a workout shorter than that), so a recording started by accident and stopped after a minute or two is not taken for the workout.
 
 ### Non-strength watch activities (climbing, etc.)
 

@@ -37,7 +37,7 @@ from hevy2garmin.routine import (
     routine_to_garmin_workout,
     workout_content_hash,
 )
-from hevy2garmin.merge import attempt_merge, reset_circuit_breaker
+from hevy2garmin.merge import MergeResult, attempt_merge, reset_circuit_breaker
 from hevy2garmin.reconcile import reconcile_missing_routine_workouts
 from hevy2garmin.db_interface import Database
 
@@ -427,24 +427,28 @@ def sync_one_workout(
             # per-record HR, or the download failed). Deleting the watch copy
             # would lose that HR for good, so instead of aborting the whole sync
             # (#244 regression) fall back to merging the sets into the watch
-            # activity in place: the watch and its HR stay, the structured sets
-            # land, and the exercise names show as placeholders. Always syncs and
-            # never loses HR — only the named-exercise nicety is dropped when the
-            # HR cannot be preserved.
+            # activity in place: the watch and its HR stay and the named sets
+            # land. Always syncs and never loses HR.
             logger.info(
                 "  ⚠ Hi-res HR unavailable for watch activity %s; keeping it and "
-                "merging sets in place instead of replacing (names may show as Unknown)",
+                "merging sets in place instead of replacing",
                 merge_delete_id,
             )
-            fallback = attempt_merge(
-                garmin_client,
-                workout,
-                merge_store,
-                overlap_threshold=merge_overlap_pct,
-                max_drift_minutes=merge_max_drift_min,
-                activity_types=merge_activity_types,
-                watch_strategy="merge",
-            )
+            try:
+                fallback = attempt_merge(
+                    garmin_client,
+                    workout,
+                    merge_store,
+                    overlap_threshold=merge_overlap_pct,
+                    max_drift_minutes=merge_max_drift_min,
+                    activity_types=merge_activity_types,
+                    watch_strategy="merge",
+                )
+            except Exception as exc:
+                # A merge that raises means "retry the merge", but this path must
+                # always sync: fall through to the fresh upload below, which
+                # skips the start-time check and leaves the watch copy alone.
+                fallback = MergeResult(merged=False, fallback_reason=str(exc))
             if fallback.merged:
                 fit_stats = _estimate_fit_stats(workout)
                 merge_store.mark_synced(

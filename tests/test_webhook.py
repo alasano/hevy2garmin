@@ -98,7 +98,7 @@ class TestWebhookAuthFailsClosed:
 
 
 class TestInFlightCap:
-    """A staged sync lives ~25 min, so unbounded spawning is a pile-up vector."""
+    """A staged sync lives up to ~2 h, so unbounded spawning is a pile-up vector."""
 
     def test_beyond_the_cap_no_new_task_is_spawned(self, client_with_cron_secret) -> None:
         from hevy2garmin import server
@@ -130,9 +130,9 @@ class TestInFlightCap:
 
 
 class TestWebhookWorker:
-    """Staged retry semantics: all but the last attempt are merge_only, so a
-    workout is uploaded plainly only once the watch activity clearly is not
-    coming; the last attempt does a full sync so nothing is left unsynced."""
+    """Staged retry semantics: every attempt is merge_only. A plain upload
+    from here would be a duplicate once the watch activity arrives, so a workout
+    that never merges is left to auto-sync."""
 
     def _run(self, responses: list[dict]) -> list[bool]:
         from hevy2garmin import server
@@ -146,15 +146,24 @@ class TestWebhookWorker:
         with (
             patch.object(server, "WEBHOOK_DELAY_SECONDS", 0),
             patch.object(server, "WEBHOOK_RETRY_INTERVAL_SECONDS", 0),
+            patch.object(server, "WEBHOOK_MAX_ATTEMPTS", 3),
             patch.object(server, "_sync_one_recorded", fake_sync_one),
         ):
             asyncio.run(server._webhook_sync())
         return calls
 
-    def test_merge_only_until_last_attempt(self) -> None:
+    def test_never_falls_back_to_a_full_sync(self) -> None:
+        """The last attempt is merge_only too, and the worker then gives up."""
         pending = {"synced": 0, "merge_pending": True, "done": False}
-        calls = self._run([pending, pending, {"synced": 1, "done": True}])
-        assert calls == [True, True, False]
+        calls = self._run([pending, pending, pending])
+        assert calls == [True, True, True]
+
+    def test_gives_up_without_waiting_after_the_last_attempt(self) -> None:
+        """A finished task frees its in-flight slot at once."""
+        pending = {"synced": 0, "merge_pending": True, "done": False}
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            self._run([pending, pending, pending])
+        assert sleep.await_count == 3  # the delay, then one gap before attempts 2 and 3
 
     def test_stops_after_first_successful_sync(self) -> None:
         calls = self._run([{"synced": 1, "done": True}])
@@ -174,7 +183,7 @@ class TestWebhookWorker:
         """
         busy = {"error": "Sync already running", "busy": True}
         calls = self._run([busy, busy, {"synced": 1, "done": True}])
-        assert calls == [True, True, False]
+        assert calls == [True, True, True]
 
     def test_a_raising_attempt_stops_the_worker(self) -> None:
         from hevy2garmin import server

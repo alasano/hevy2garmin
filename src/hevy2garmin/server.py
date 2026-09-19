@@ -197,14 +197,19 @@ _unmapped_cache_time: float = 0
 _failed_ids: set[str] = set()  # Workouts that failed upload this session (retried next session)
 
 
-def _acquire_sync_lock() -> bool:
-    """Try to acquire the sync lock. Force-release if held too long (hung sync)."""
+def _acquire_sync_lock(*, force: bool = True) -> bool:
+    """Try to acquire the sync lock. Force-release if held too long (hung sync).
+
+    ``force=False`` is for the webhook's merge-only polls: they come every few
+    minutes for hours, and "busy" just means the next poll tries again, so they
+    must never take the lock from a long but live sync.
+    """
     global _sync_lock_acquired_at
     if _sync_executing.acquire(blocking=False):
         _sync_lock_acquired_at = time.time()
         return True
     # Check if the lock has been held too long (hung sync)
-    if _sync_lock_acquired_at and (time.time() - _sync_lock_acquired_at) > _SYNC_LOCK_TIMEOUT:
+    if force and _sync_lock_acquired_at and (time.time() - _sync_lock_acquired_at) > _SYNC_LOCK_TIMEOUT:
         logger.warning("Sync lock held for >%ds — force-releasing (likely hung)", _SYNC_LOCK_TIMEOUT)
         try:
             _sync_executing.release()
@@ -310,7 +315,14 @@ def _run_autosync() -> None:
             hevy_auth_failed = True
         result = {"synced": 0, "skipped": 0, "failed": 1, "error": str(e)}
     finally:
-        _sync_executing.release()
+        # A sync that outlasts _SYNC_LOCK_TIMEOUT can have its lock force-released
+        # by another caller. Raising here would skip the reschedule below and
+        # stop auto-sync until restart, and auto-sync is what uploads a workout
+        # the webhook could not merge.
+        try:
+            _sync_executing.release()
+        except RuntimeError:
+            pass
 
     if hevy_auth_failed:
         return  # Don't reschedule
@@ -2130,7 +2142,7 @@ async def _sync_one_recorded(
 
     from fastapi.responses import JSONResponse
 
-    if not _acquire_sync_lock():
+    if not _acquire_sync_lock(force=not merge_only):
         return JSONResponse({"error": "Sync already running", "busy": True})
 
     try:
@@ -2152,7 +2164,11 @@ async def _sync_one_recorded(
         # exact ambiguity this is meant to remove. error/skipped_error are the
         # hard-stop shapes. needs_review/processing stay 0/0: still in flight.
         failed = 1 if (data.get("error") or data.get("skipped_error") or data.get("failed")) else 0
-        _record_sync_log({"synced": data.get("synced", 0), "failed": failed}, trigger=trigger)
+        # A merge-only attempt still waiting for the watch activity is one of up
+        # to WEBHOOK_MAX_ATTEMPTS polls, not a sync: recording each would bury
+        # the rows that say what actually synced.
+        if not data.get("merge_pending"):
+            _record_sync_log({"synced": data.get("synced", 0), "failed": failed}, trigger=trigger)
     except Exception:
         logger.debug("sync_log record failed", exc_info=True)
     return resp
@@ -2254,10 +2270,13 @@ async def _do_sync_one(*, respect_grace: bool = False, merge_only: bool = False)
                     "remaining": remaining,
                     "done": remaining <= 0,
                 })
+            # Nothing this call can work on. Whatever is still counted as
+            # remaining is pending or was skipped after an error this session,
+            # so a caller that loops while remaining > 0 must stop here.
             remaining = max(0, total_count - db.get_synced_count())
             return JSONResponse({
                 "synced": 0, "processing": len(pending_ids),
-                "remaining": remaining, "done": remaining <= len(pending_ids),
+                "remaining": remaining, "done": True,
             })
 
         # Defer before Garmin auth when possible (cron cold starts).
@@ -2334,8 +2353,11 @@ async def _do_sync_one(*, respect_grace: bool = False, merge_only: bool = False)
                 }, status_code=500)
 
             # Other upload errors — skip this workout for now, don't mark as synced
-            # Track in-memory so we don't retry it in the same sync session
-            _failed_ids.add(unsynced["id"])
+            # Track in-memory so we don't retry it in the same sync session.
+            # A merge-only attempt is a background poll, not such a session: it
+            # must not hide the workout from the owner's next Sync Now.
+            if not merge_only:
+                _failed_ids.add(unsynced["id"])
             remaining = hevy.get_workout_count() - db.get_synced_count() - len(_failed_ids)
             logger.warning("Skipping failed workout %s (will retry next session), %d remaining", unsynced["title"], remaining)
             return JSONResponse({"synced": 0, "skipped_error": True, "title": unsynced["title"], "remaining": max(0, remaining), "done": remaining <= 0})
@@ -2369,12 +2391,15 @@ async def cron_sync(request: Request, merge_only: bool = Query(False)):
 # ── Hevy webhook receiver ────────────────────────────────────────────────────
 # Hevy fires this when a workout is saved. The paired watch activity usually
 # reaches Garmin Connect a few minutes later, so the sync is staged: wait,
-# then try merge-only, and only the final attempt falls back to a plain FIT
-# upload — so a workout is never left unsynced. Retry state is in-memory
-# only; a restart drops it and auto-sync is the safety net.
+# then try merge-only every few minutes for as long as the sync grace period
+# (two hours by default). It never uploads a plain FIT: a watch activity that
+# arrives after such an upload is a duplicate, and the workout would already
+# be marked synced. A workout that never merges is left to auto-sync, which
+# decides between merge and upload once the grace period is over. Retry state
+# is in-memory only; a restart drops it and auto-sync is the safety net.
 WEBHOOK_DELAY_SECONDS = int(os.environ.get("WEBHOOK_DELAY_SECONDS", "300"))
-WEBHOOK_RETRY_INTERVAL_SECONDS = int(os.environ.get("WEBHOOK_RETRY_INTERVAL_SECONDS", "600"))
-WEBHOOK_MAX_ATTEMPTS = int(os.environ.get("WEBHOOK_MAX_ATTEMPTS", "3"))
+WEBHOOK_RETRY_INTERVAL_SECONDS = int(os.environ.get("WEBHOOK_RETRY_INTERVAL_SECONDS", "300"))
+WEBHOOK_MAX_ATTEMPTS = int(os.environ.get("WEBHOOK_MAX_ATTEMPTS", "24"))
 # Ceiling on concurrently staged syncs; a burst past this is declined, not queued.
 WEBHOOK_MAX_INFLIGHT = int(os.environ.get("WEBHOOK_MAX_INFLIGHT", "4"))
 
@@ -2390,7 +2415,7 @@ async def _webhook_sync() -> None:
     for attempt in range(1, WEBHOOK_MAX_ATTEMPTS + 1):
         is_last = attempt == WEBHOOK_MAX_ATTEMPTS
         try:
-            resp = await _sync_one_recorded(merge_only=not is_last, trigger="webhook")
+            resp = await _sync_one_recorded(merge_only=True, trigger="webhook")
             data = json.loads(bytes(resp.body))
         except Exception as e:
             logger.error("Webhook sync attempt %d/%d failed: %s",
@@ -2399,17 +2424,13 @@ async def _webhook_sync() -> None:
         # A lock collision with auto-sync is not an answer — retry, don't give up.
         retry = bool(data.get("busy")) or bool(data.get("merge_pending"))
         if not retry:
-            logger.info(
-                "Webhook sync attempt %d/%d: %s",
-                attempt,
-                WEBHOOK_MAX_ATTEMPTS,
-                f"synced '{data.get('title', '?')}'" if data.get("synced") else "nothing pending",
-            )
+            # Synced, nothing left to sync, or an error that auto-sync will retry.
+            logger.info("Webhook sync attempt %d/%d: %s", attempt, WEBHOOK_MAX_ATTEMPTS, data)
             return
         if not is_last:
             await asyncio.sleep(WEBHOOK_RETRY_INTERVAL_SECONDS)
     logger.warning(
-        "Webhook sync: workout still pending after %d attempts — auto-sync will retry",
+        "Webhook sync: no merge after %d attempts, auto-sync will retry",
         WEBHOOK_MAX_ATTEMPTS,
     )
 
@@ -2444,7 +2465,7 @@ async def cron_webhook(request: Request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     # Each accepted request owns a task for up to WEBHOOK_DELAY +
-    # (MAX_ATTEMPTS - 1) * RETRY_INTERVAL seconds (~25 min by default), so
+    # (MAX_ATTEMPTS - 1) * RETRY_INTERVAL seconds (~2 h by default), so
     # unbounded spawning lets a burst pile up tasks that only queue on the sync
     # lock and hammer Garmin. Past the cap, decline to add another: those
     # already staged plus auto-sync cover the work, and Hevy still gets a 200 so
