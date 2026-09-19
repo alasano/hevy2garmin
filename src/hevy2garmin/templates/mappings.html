@@ -53,7 +53,7 @@
             <select name="category" class="form-select cat-select" style="font-size: 12px; padding: 4px 8px; min-height: 32px; flex: 1;"
                     onchange="showUnmappedSubs(this, {{ loop.index }})">
             </select>
-            <input type="number" name="subcategory" id="unmapped-sub-{{ loop.index }}" value="0" min="0" class="form-input" style="width: 60px; font-size: 12px; padding: 4px 8px; min-height: 32px;" placeholder="Sub">
+            <input type="number" name="subcategory" id="unmapped-sub-{{ loop.index }}" value="65535" min="0" class="form-input" style="width: 80px; font-size: 12px; padding: 4px 8px; min-height: 32px;" placeholder="Sub">
             <button type="submit" class="btn btn-primary btn-sm" style="white-space: nowrap;">Map</button>
         </form>
         <div id="unmapped-sub-helper-{{ loop.index }}" style="margin-top: 6px; display: none;">
@@ -109,7 +109,7 @@
         <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.7;">
             <strong>Exercise name:</strong> Must match exactly as shown on your <a href="/workouts">Workouts</a> page.<br>
             <strong>Category:</strong> Pick the closest Garmin exercise type. When you select one, available sub-exercises are shown below.<br>
-            <strong>Sub ID:</strong> Use <strong>0</strong> for generic, or pick from the list that appears when you select a category.
+            <strong>Sub ID:</strong> Use <strong>65535</strong> for generic (the category name alone), or pick from the list that appears when you select a category. 0 is not generic: it is the first exercise of the category.
             <br><span style="font-size: 11px;">Reference: <a href="https://developer.garmin.com/fit/overview/" target="_blank" rel="noopener">Garmin FIT SDK</a></span>
         </p>
         <form id="mapping-form" style="display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap;"
@@ -125,7 +125,7 @@
             </div>
             <div style="width: 70px;">
                 <label class="form-label" style="font-size: 11px;">Sub ID</label>
-                <input type="number" name="subcategory" id="map-subid" value="0" min="0" class="form-input" style="font-size: 13px; min-height: 36px;">
+                <input type="number" name="subcategory" id="map-subid" value="65535" min="0" class="form-input" style="font-size: 13px; min-height: 36px;">
             </div>
             <button type="submit" class="btn btn-primary btn-sm" style="min-height: 36px;">Save</button>
         </form>

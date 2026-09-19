@@ -1365,7 +1365,7 @@ async def api_save_mapping(request: Request):
     form = await request.form()
     hevy_name = form.get("hevy_name", "").strip()
     category = int(form.get("category", 65534))
-    subcategory = int(form.get("subcategory", 0))
+    subcategory = int(form.get("subcategory", 65535))  # 65535 is generic; 0 is a real exercise
 
     if not hevy_name:
         return HTMLResponse('<div class="toast toast-error">Exercise name required</div>')

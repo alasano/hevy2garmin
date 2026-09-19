@@ -136,6 +136,65 @@ class TestSaveCustomMappingCloud:
         m._custom_mappings.clear()
 
 
+class TestTargetsExistInGarminConnect:
+    """Garmin Connect only renders an exercise name it knows.
+
+    tests/fixtures/garmin_connect_exercises.json is the category -> names list the
+    Connect exercise picker uses (connect.garmin.com/web-data/exercises/Exercises.json,
+    saved 2026-09-19). The FIT profile is wider than that list, so a pair that is
+    valid FIT can still be a name Connect rejects or shows as "Unknown".
+    """
+
+    GARMIN = json.loads((Path(__file__).parent / "fixtures" / "garmin_connect_exercises.json").read_text())
+    GENERIC = 65535
+
+    def _unknown_to_garmin(self, table: dict) -> list:
+        from hevy2garmin.mapper import fit_exercise_strings
+
+        unknown = []
+        for source, (category, subcategory) in table.items():
+            if category == _UNKNOWN_CATEGORY:
+                continue
+            category_name, exercise_name = fit_exercise_strings(category, subcategory)
+            if category_name not in self.GARMIN or (
+                subcategory != self.GENERIC and exercise_name not in self.GARMIN[category_name]
+            ):
+                unknown.append((source, category_name, exercise_name))
+        return unknown
+
+    def test_every_table_target(self) -> None:
+        assert self._unknown_to_garmin(HEVY_TO_GARMIN) == []
+
+    def test_every_template_target(self) -> None:
+        from hevy2garmin.template_map import TEMPLATE_TO_GARMIN
+
+        assert self._unknown_to_garmin(TEMPLATE_TO_GARMIN) == []
+
+    def test_plain_exercises_map_to_their_plain_name(self) -> None:
+        """Each was mapped to a qualified variant while Garmin lists the plain exercise."""
+        from hevy2garmin.mapper import fit_exercise_strings
+
+        expected = {
+            "Lateral Raise (Dumbbell)": "DUMBBELL_LATERAL_RAISE",  # was LEANING_DUMBBELL_LATERAL_RAISE
+            "Chin Up": "CHIN_UP",
+            "Chin Up (Weighted)": "WEIGHTED_CHIN_UP",
+            "Bicep Curl (Dumbbell)": "DUMBBELL_BICEPS_CURL",
+            "Shoulder Press (Dumbbell)": "DUMBBELL_SHOULDER_PRESS",
+            "Reverse Lunge (Dumbbell)": "DUMBBELL_REVERSE_LUNGE",
+            "Overhead Dumbbell Lunge": "OVERHEAD_DUMBBELL_LUNGE",
+            "Dumbbell Snatch": "DUMBBELL_SNATCH",
+            "Snatch": "SNATCH",
+            "Split Jerk": "SPLIT_JERK",
+            "Clean and Press": "CLEAN_AND_PRESS",
+            "Box Jump": "BOX_JUMP",
+            "Jump Squat": "JUMP_SQUAT",
+            "Straight Leg Deadlift": "STRAIGHT_LEG_DEADLIFT",
+            "Inverted Row": "INVERTED_ROW",
+        }
+        resolved = {name: fit_exercise_strings(*lookup_exercise(name)[:2])[1] for name in expected}
+        assert resolved == expected
+
+
 class TestNoDuplicateKeys:
     """A repeated key in the table literal is invisible: Python keeps the last
     one, so an exact FIT mapping can be silently replaced by an approximation
