@@ -67,11 +67,11 @@ class TestSyncOneAfterAnError:
 
     WORKOUT = {"id": "w-err", "title": "Push", "exercises": []}
 
-    def _sync_one(self, *, scan, merge_only=False, sync_error=None):
+    def _sync_one(self, *, scan, merge_only=False, sync_error=None, pending=()):
         hevy = MagicMock()
-        hevy.get_workout_count.return_value = 1
+        hevy.get_workout_count.return_value = 1 + len(pending)
         database = MagicMock()
-        database.list_pending.return_value = []
+        database.list_pending.return_value = list(pending)
         with (
             patch.object(server, "load_config", return_value={"hevy_api_key": "k", "merge_mode": True}),
             patch("hevy2garmin.hevy.HevyClient", return_value=hevy),
@@ -97,6 +97,17 @@ class TestSyncOneAfterAnError:
         )
         assert data["skipped_error"] is True
         assert failed == set()
+
+    def test_only_uploads_garmin_is_importing_count_as_processing(self) -> None:
+        """A rejected upload or one needing review waits for the owner, not for Garmin."""
+        pending = [
+            {"hevy_id": "p1", "phase": "uploaded"},
+            {"hevy_id": "p2", "phase": "failed"},
+            {"hevy_id": "p3", "phase": "needs_review"},
+        ]
+        data, _ = self._sync_one(scan=None, pending=pending)
+        assert data["processing"] == 1
+        assert data["remaining"] == 4
 
     def test_nothing_to_work_on_ends_the_sync_now_loop(self) -> None:
         """One workout is unsynced but skipped: the dashboard loops while remaining > 0."""

@@ -420,6 +420,8 @@ async function syncNow() {
     let total = 0;
     let synced = 0;
     let errors = 0;
+    const onGarminEl = document.getElementById('stat-on-garmin');
+    const onGarminStart = onGarminEl ? parseInt(onGarminEl.textContent, 10) : NaN;
 
     while (!_syncStopped) {
         try {
@@ -450,13 +452,18 @@ async function syncNow() {
                 break;
             }
 
+            // Count before the done check: the last workout of a run arrives
+            // with done=true, and a run of one is nothing but its last workout.
+            if (data.synced > 0) synced++;
+
             if (data.done || (data.synced === 0 && data.remaining <= 0)) {
+                _syncStopped = false;  // nothing is left to resume
                 if (data.skipped_error) {
                     errors++;
                     text.textContent = '"' + data.title + '" could not be synced. Auto-sync will retry it; see the logs.';
                 } else if (data.remaining > (data.processing || 0)) {
                     errors++;
-                    text.textContent = (data.remaining - (data.processing || 0)) + ' not synced: skipped after an error earlier. Auto-sync will retry.';
+                    text.textContent = (data.remaining - (data.processing || 0)) + ' not synced: an error, a rejected upload or one that needs review. See the Workouts page.';
                 } else if (data.processing > 0) {
                     text.textContent = data.processing + ' still processing on Garmin.';
                 } else {
@@ -467,18 +474,15 @@ async function syncNow() {
             }
 
             if (data.synced > 0) {
-                synced++;
                 if (total === 0) total = synced + (data.remaining || 0);
                 const pct = total > 0 ? Math.round((synced / total) * 100) : 0;
-                const verb = data.skipped_error ? 'Skipped (error)' : data.skipped_duplicate ? 'Skipped' : 'Synced';
-                text.textContent = verb + ' "' + data.title + '" (' + synced + '/' + total + ')';
+                text.textContent = 'Synced "' + data.title + '" (' + synced + '/' + total + ')';
                 bar.style.width = pct + '%';
                 // Update stats live
                 if (data.remaining >= 0) {
-                    const onGarminEl = document.getElementById('stat-on-garmin');
                     const pendingEl = document.getElementById('stat-pending');
                     if (pendingEl) pendingEl.textContent = data.remaining;
-                    if (onGarminEl) onGarminEl.textContent = total - data.remaining;
+                    if (!isNaN(onGarminStart)) onGarminEl.textContent = onGarminStart + synced;
                 }
             } else if (data.remaining > 0) {
                 continue;
@@ -492,32 +496,31 @@ async function syncNow() {
         }
     }
 
-    if (_syncStopped && synced > 0) {
-        text.textContent = 'Paused after ' + synced + ' workouts. Click Sync Now to resume.';
-    }
+    if (_syncStopped && synced === 0 && errors === 0) text.textContent = 'Sync stopped.';
 
     progress.style.display = 'none';
     stopBtn.style.display = 'none';
     btn.disabled = false;
     btn.style.opacity = '1';
 
-    if (synced > 0 && !_syncStopped) {
-        result.innerHTML = '<div class="toast toast-success">' + synced + ' workout' + (synced > 1 ? 's' : '') + ' synced to Garmin.</div>';
-        if (errors > 0) {
-            // Built with textContent: the message can carry a workout title.
-            const failed = document.createElement('div');
-            failed.className = 'toast toast-error';
-            failed.textContent = text.textContent;
-            result.appendChild(failed);
-        }
+    // The loop leaves its last message in `text`, which is hidden now. Toasts are
+    // built with textContent because that message can carry a workout title.
+    function toast(kind, message) {
+        const el = document.createElement('div');
+        el.className = 'toast' + (kind ? ' toast-' + kind : '');
+        if (!kind) el.style.cssText = 'background:rgba(100,116,139,0.15);border-color:rgba(100,116,139,0.3);';
+        el.textContent = message;
+        result.appendChild(el);
+    }
+
+    if (synced > 0) {
+        toast('success', _syncStopped
+            ? synced + ' synced. Resume anytime.'
+            : synced + ' workout' + (synced > 1 ? 's' : '') + ' synced to Garmin.');
+        if (errors > 0) toast('error', text.textContent);
         setTimeout(function() { location.reload(); }, errors > 0 ? 6000 : 2000);
-    } else if (synced > 0 && _syncStopped) {
-        result.innerHTML = '<div class="toast toast-success">' + synced + ' synced. Resume anytime.</div>';
-        setTimeout(function() { location.reload(); }, 2000);
-    } else if (errors > 0 && !result.innerHTML) {
-        result.innerHTML = '<div class="toast toast-error">' + text.textContent + '</div>';
-    } else {
-        result.innerHTML = '<div class="toast" style="background:rgba(100,116,139,0.15);border-color:rgba(100,116,139,0.3);">Everything is already synced.</div>';
+    } else if (!result.innerHTML) {
+        toast(errors > 0 ? 'error' : '', text.textContent);
     }
 }
 </script>

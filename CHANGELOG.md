@@ -18,7 +18,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Sync Now no longer loops without pause when the only unsynced workout was skipped after an error.
 - A failed push of the sets into a watch activity under the merge strategy now fails that workout's sync so it is retried. It used to fall through to the start-time check, which found the same watch activity, renamed it without sets and recorded it as an upload. The same applies once the circuit breaker has tripped after three failed pushes in one run. The replace strategy's in-place fallback still uploads a fresh activity when that push fails.
 - Auto-sync no longer stops until restart when a sync that ran longer than the lock timeout had its lock force-released by another caller, and the webhook's merge-only polls never force-release the lock.
-- Sync Now reports a workout that was skipped after an error instead of "Everything is already synced".
+- Sync Now counts the last workout of a run. The done check ran before the count, so syncing one workout said "Everything is already synced" and left the page stale, and syncing three reported two.
+- Sync Now reports a workout that was skipped after an error instead of "Everything is already synced", also when other workouts synced or Stop was pressed, and its closing message says what happened (busy, stopped, still processing) instead of always "Everything is already synced". A rejected upload or one that needs review is no longer reported as still processing on Garmin. Messages that carry a workout title are inserted as text.
+- The "On Garmin" number no longer drops to the count of the current run while Sync Now is running.
+- The Workouts page's per-row sync shows what happened to the workout (processing, needs review, rejected) instead of always "Synced".
 - The merge match log line reports the real overlap and start drift.
 
 ## [0.9.0] - 2026-07-28

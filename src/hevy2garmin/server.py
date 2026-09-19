@@ -1889,10 +1889,15 @@ async def api_sync_single(request: Request, workout_id: str):
         )
 
         start = (workout.get("start_time") or "")[:16]
-        return HTMLResponse(f'<tr><td><span class="badge badge-success">✓ Synced</span></td><td>{start}</td><td><strong>{workout["title"]}</strong></td><td>{len(workout.get("exercises", []))}</td><td></td></tr>')
+        badge = {
+            "synced": '<span class="badge badge-success">✓ Synced</span>',
+            "processing": '<span class="badge badge-pending">Processing on Garmin</span>',
+            "needs_review": '<span class="badge badge-pending">Needs review</span>',
+        }.get(one.status, '<span class="badge badge-pending">Rejected by Garmin</span>')
+        return HTMLResponse(f'<tr><td>{badge}</td><td>{escape(start)}</td><td><strong>{escape(workout["title"])}</strong></td><td>{len(workout.get("exercises", []))}</td><td></td></tr>')
     except Exception as e:
         _record_sync_log({"failed": 1}, trigger="manual (single)")
-        return HTMLResponse(f'<td colspan="5" style="color: var(--pico-del-color);">Failed: {e}</td>')
+        return HTMLResponse(f'<td colspan="5" style="color: var(--pico-del-color);">Failed: {escape(str(e))}</td>')
 
 
 @app.post("/api/unsync/{hevy_id}")
@@ -2253,7 +2258,7 @@ async def _do_sync_one(*, respect_grace: bool = False, merge_only: bool = False)
     unmapped_found: dict[str, int] = {}
     garmin_client = None
 
-    from hevy2garmin.sync import _workout_within_grace, sync_one_workout
+    from hevy2garmin.sync import _pending_status, _workout_within_grace, sync_one_workout
 
     while True:
         unsynced, unmapped_found = _scan_for_unsynced(
@@ -2273,9 +2278,13 @@ async def _do_sync_one(*, respect_grace: bool = False, merge_only: bool = False)
             # Nothing this call can work on. Whatever is still counted as
             # remaining is pending or was skipped after an error this session,
             # so a caller that loops while remaining > 0 must stop here.
+            # "processing" is what Garmin is still importing. A rejected upload
+            # or one that needs review is a pending row too, but it waits for the
+            # owner, so it is left to show up in remaining alone.
             remaining = max(0, total_count - db.get_synced_count())
+            processing = sum(1 for row in pending_rows if _pending_status(row) == "processing")
             return JSONResponse({
-                "synced": 0, "processing": len(pending_ids),
+                "synced": 0, "processing": processing,
                 "remaining": remaining, "done": True,
             })
 

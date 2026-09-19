@@ -242,6 +242,35 @@ class TestPerRowSyncIsRecorded:
         assert resp.status_code == 200
         assert recorded == [({"synced": 1, "failed": 0}, "manual (single)")]
 
+    @pytest.mark.parametrize(
+        "status,badge",
+        [
+            ("synced", "Synced"),
+            ("processing", "Processing on Garmin"),
+            ("needs_review", "Needs review"),
+            ("failed", "Rejected by Garmin"),
+        ],
+    )
+    def test_the_row_says_what_happened_to_the_workout(self, client, recorded, monkeypatch, status, badge):
+        """It used to say Synced whatever sync_one_workout returned."""
+        from types import SimpleNamespace
+
+        import hevy2garmin.hevy as hevy_mod
+        import hevy2garmin.sync as sync_mod
+        from hevy2garmin import db, garmin, merge
+
+        workout = {"id": "w1", "title": "Push <b>day</b>", "start_time": "2026-04-01T20:00:00+00:00", "exercises": []}
+        monkeypatch.setattr(hevy_mod, "HevyClient", lambda **kw: SimpleNamespace(get_workout=lambda wid: workout))
+        monkeypatch.setattr(garmin, "get_client", lambda email=None: object())
+        monkeypatch.setattr(merge, "reset_circuit_breaker", lambda: None)
+        monkeypatch.setattr(db, "get_db", lambda: object())
+        monkeypatch.setattr(sync_mod, "sync_one_workout", lambda *a, **kw: SimpleNamespace(status=status))
+
+        text = client.post("/api/sync/w1").text
+        assert badge in text
+        assert ("Synced" in text) is (status == "synced")
+        assert "Push &lt;b&gt;day&lt;/b&gt;" in text
+
     def test_an_exception_records_a_failure_and_still_renders(self, client, recorded, monkeypatch):
         import hevy2garmin.hevy as hevy_mod
 
