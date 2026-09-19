@@ -462,13 +462,14 @@ def attempt_merge(
             activity_id, manufacturer,
         )
 
-    # Backup existing exercise sets
+    # Back up the activity's own sets, once. On a second merge (a workout
+    # unsynced and synced again) the activity already holds pushed Hevy sets,
+    # and saving those would overwrite the only copy of what the watch recorded.
+    backup_key = f"merge_backup_{activity_id}"
     try:
-        existing_sets = get_activity_exercise_sets(client, activity_id)
-        database.set_app_config(
-            f"merge_backup_{activity_id}",
-            {"activity_id": activity_id, "original_sets": existing_sets},
-        )
+        if database.get_app_config(backup_key) is None:
+            existing_sets = get_activity_exercise_sets(client, activity_id)
+            database.set_app_config(backup_key, {"activity_id": activity_id, "original_sets": existing_sets})
     except Exception as e:
         logger.warning("Could not backup exercise sets for %s: %s", activity_id, e)
         # Continue anyway — backup is best-effort

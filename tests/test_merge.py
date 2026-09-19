@@ -462,6 +462,7 @@ class TestAttemptMerge:
         # first read = backup, second read = verify (names applied)
         mock_get_sets.side_effect = [{"exerciseSets": []}, _APPLIED]
         mock_db = MagicMock()
+        mock_db.get_app_config.return_value = None  # a first merge: no backup yet
 
         result = attempt_merge(MagicMock(), HEVY_WORKOUT, mock_db)
 
@@ -503,6 +504,29 @@ class TestAttemptMerge:
 
         assert result.merged is False
         assert "No matching" in result.fallback_reason
+
+    @patch("hevy2garmin.merge.time.sleep")
+    @patch("hevy2garmin.merge.find_matching_garmin_activity")
+    @patch("hevy2garmin.merge.get_activity_exercise_sets")
+    @patch("hevy2garmin.merge.push_exercise_sets")
+    def test_second_merge_keeps_the_backup_of_the_watch_sets(self, mock_push, mock_get_sets, mock_find, _sleep):
+        """Unsync and sync again: the activity then holds Hevy sets, not the watch's."""
+        watch = _make_garmin_activity()
+        watch["manufacturer"] = "GARMIN"
+        mock_find.return_value = watch
+        watch_sets = {"exerciseSets": [{"setType": "ACTIVE", "repetitionCount": 7}]}
+        pushed_sets = {"exerciseSets": [{"setType": "ACTIVE", "repetitionCount": 8}]}
+        mock_get_sets.side_effect = [watch_sets, pushed_sets]
+        stored: dict = {}
+        database = MagicMock()
+        database.get_app_config.side_effect = stored.get
+        database.set_app_config.side_effect = stored.__setitem__
+
+        for _ in range(2):
+            assert attempt_merge(MagicMock(), HEVY_WORKOUT, database, watch_strategy="merge").merged
+
+        assert stored["merge_backup_12345"]["original_sets"] == watch_sets
+        assert mock_push.call_count == 2
 
     @patch("hevy2garmin.merge.find_matching_garmin_activity")
     @patch("hevy2garmin.merge.get_activity_exercise_sets")
@@ -594,8 +618,10 @@ def test_development_upload_still_merges(mock_desc, mock_rename, mock_push, mock
     act["manufacturer"] = "DEVELOPMENT"
     mock_find.return_value = act
     mock_get.side_effect = [{"exerciseSets": []}, _APPLIED]
+    first_merge = MagicMock()
+    first_merge.get_app_config.return_value = None  # no backup yet, so the first read is the backup
 
-    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
+    result = attempt_merge(MagicMock(), HEVY_WORKOUT, first_merge)
 
     assert result.merged is True
     mock_push.assert_called_once()
