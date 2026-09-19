@@ -349,128 +349,58 @@ class TestSyncOneWorkout:
                 sync_method="merge",
             )
 
-    def test_watch_replacement_falls_back_to_merge_when_hr_unextractable(
-        self, sample_workout: dict
-    ) -> None:
-        # Regression #244: when Replace cannot preserve the watch's hi-res HR, it
-        # must NOT hard-abort and must NOT delete the watch activity. It falls
-        # back to merging the sets into the watch in place (keeps the watch and
-        # its HR), so the sync still succeeds and no HR is lost.
-        mock_db = MagicMock()
-        with patch("hevy2garmin.sync.attempt_merge") as mock_merge, \
-             patch("hevy2garmin.hr.backup_activity_hr", return_value=[]) as backup, \
-             patch("hevy2garmin.sync._estimate_fit_stats", return_value={"calories": 100, "avg_hr": 90}), \
-             patch("hevy2garmin.sync.generate_fit") as generate_fit, \
-             patch("hevy2garmin.sync.upload_fit") as upload_fit:
-            mock_merge.side_effect = [
-                MergeResult(
-                    merged=False,
-                    force_fresh_upload=True,
-                    delete_after_upload=444,
-                    fallback_reason="watch replacement",
-                ),
-                MergeResult(merged=True, activity_id=444),
-            ]
-
-            result = sync_one_workout(
-                sample_workout,
-                cfg={
-                    "merge_mode": True,
-                    "merge_watch_strategy": "replace",
-                    "hr_fusion": {"enabled": False},
-                },
-                garmin_client=MagicMock(),
-                database=mock_db,
-            )
-
-        # HR backup was attempted (data-safety intent preserved) ...
-        backup.assert_called_once()
-        # ... but no hard abort, no fresh upload, and no watch deletion.
-        generate_fit.assert_not_called()
-        upload_fit.assert_not_called()
-        # Fell back to an in-place merge (second attempt_merge, watch_strategy=merge).
-        assert mock_merge.call_count == 2
-        assert mock_merge.call_args_list[1].kwargs["watch_strategy"] == "merge"
-        assert result.status == "synced"
-        assert result.sync_method == "merge"
-        assert result.merged is True
-        assert result.activity_id == 444
-        mock_db.mark_synced.assert_called_once()
-
-    def test_watch_replacement_still_syncs_when_the_in_place_merge_raises(
-        self, sample_workout: dict
-    ) -> None:
-        # Under the merge strategy a failed push raises so the merge is retried.
-        # Here it is only the #244 fallback: the workout must still sync as a
-        # fresh upload beside the untouched watch copy, not fail.
+    @pytest.mark.parametrize(
+        "error",
+        [MergeFailed("PUT exerciseSets failed"), ConnectionError("Garmin unreachable")],
+    )
+    def test_a_failed_merge_does_not_upload(self, sample_workout: dict, error: Exception) -> None:
+        # A failed push into a watch activity, or a Garmin listing that fails,
+        # must stop the workout's sync: an upload would land next to the watch
+        # activity and the workout would be recorded as synced for good.
         store = MagicMock()
         store.get_pending.return_value = None
-        garmin = MagicMock()
-        with patch("hevy2garmin.sync.attempt_merge") as mock_merge, \
-             patch("hevy2garmin.hr.backup_activity_hr", return_value=[]), \
-             patch("hevy2garmin.sync.generate_fit", return_value={"exercises": 2, "total_sets": 5, "calories": 100, "avg_hr": 90}), \
-             patch("hevy2garmin.sync.find_activity_by_start_time") as find_existing, \
-             patch("hevy2garmin.sync.upload_fit", return_value={"activity_id": 555}) as upload_fit:
-            mock_merge.side_effect = [
-                MergeResult(
-                    merged=False,
-                    force_fresh_upload=True,
-                    delete_after_upload=444,
-                    fallback_reason="watch replacement",
-                ),
-                MergeFailed("PUT exerciseSets failed"),
-            ]
-
-            sync_one_workout(
-                sample_workout,
-                cfg={
-                    "merge_mode": True,
-                    "merge_watch_strategy": "replace",
-                    "hr_fusion": {"enabled": False},
-                },
-                garmin_client=garmin,
-                database=store,
-            )
-
-        upload_fit.assert_called_once()
-        find_existing.assert_not_called()
-        garmin.delete_activity.assert_not_called()
-
-    def test_watch_replacement_does_not_upload_when_the_listing_fails(self, sample_workout: dict) -> None:
-        # Only a failed push is "merge failed, upload instead". A Garmin listing
-        # that fails means the watch activity could not be seen at all, and an
-        # upload then lands next to it.
-        store = MagicMock()
-        store.get_pending.return_value = None
-        with patch("hevy2garmin.sync.attempt_merge") as mock_merge, \
-             patch("hevy2garmin.hr.backup_activity_hr", return_value=[]), \
+        with patch("hevy2garmin.sync.attempt_merge", side_effect=error), \
              patch("hevy2garmin.sync.generate_fit") as generate_fit, \
              patch("hevy2garmin.sync.upload_fit") as upload_fit:
-            mock_merge.side_effect = [
-                MergeResult(
-                    merged=False,
-                    force_fresh_upload=True,
-                    delete_after_upload=444,
-                    fallback_reason="watch replacement",
-                ),
-                ConnectionError("Garmin unreachable"),
-            ]
-
-            with pytest.raises(ConnectionError, match="Garmin unreachable"):
+            with pytest.raises(type(error), match=str(error)):
                 sync_one_workout(
                     sample_workout,
-                    cfg={
-                        "merge_mode": True,
-                        "merge_watch_strategy": "replace",
-                        "hr_fusion": {"enabled": False},
-                    },
+                    cfg={"merge_mode": True, "hr_fusion": {"enabled": False}},
                     garmin_client=MagicMock(),
                     database=store,
                 )
 
         generate_fit.assert_not_called()
         upload_fit.assert_not_called()
+        store.claim_pending.assert_not_called()
         store.mark_synced.assert_not_called()
+
+    def test_an_upload_that_resolves_to_a_pre_existing_activity_is_parked(
+        self, sample_workout: dict, tmp_path
+    ) -> None:
+        # Garmin can answer an upload with an activity that was already there
+        # (a watch recording that did not qualify for a merge). Renaming it and
+        # recording it as this workout's upload would be wrong for good.
+        from hevy2garmin.db_sqlite import SQLiteDatabase
+
+        store = SQLiteDatabase(tmp_path / "sync.db")
+        wid = sample_workout["id"]
+        with patch("hevy2garmin.sync.generate_fit", return_value={"exercises": 2, "total_sets": 5, "calories": 100, "avg_hr": 90}), \
+             patch("hevy2garmin.sync.find_activity_by_start_time", return_value=None), \
+             patch("hevy2garmin.sync.activities_for_workout", return_value=[{"activityId": 444}]), \
+             patch("hevy2garmin.sync.upload_fit", return_value={"activity_id": 444, "upload_id": "u1"}), \
+             patch("hevy2garmin.sync.rename_activity") as rename:
+            result = sync_one_workout(
+                sample_workout,
+                cfg={"merge_mode": False, "hr_fusion": {"enabled": False}},
+                garmin_client=MagicMock(),
+                database=store,
+            )
+
+        assert result.status == "processing"
+        rename.assert_not_called()
+        assert store.is_synced(wid) is False
+        assert store.get_pending(wid)["phase"] == "processing"
 
     def test_description_disabled_skips_set_description(self, sample_workout: dict) -> None:
         with patch("hevy2garmin.sync.db") as mock_db, \

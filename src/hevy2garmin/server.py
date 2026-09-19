@@ -1301,7 +1301,6 @@ async def settings_save(
     merge_overlap_pct: int = Form(70),
     merge_max_drift_min: int = Form(20),
     merge_extra_types: str = Form(""),
-    merge_watch_strategy: str = Form("merge"),
 ):
     config = load_config()
     if hevy_api_key:
@@ -1332,7 +1331,6 @@ async def settings_save(
     config["merge_activity_types"] = ["strength_training"] + [
         t for t in dict.fromkeys(extra_types) if t != "strength_training"
     ]
-    config["merge_watch_strategy"] = merge_watch_strategy if merge_watch_strategy in ("replace", "merge", "describe") else "merge"
     save_config(config)
 
     # Persist settings to the database when one is configured
@@ -1348,7 +1346,6 @@ async def settings_save(
                 "merge_overlap_pct": config["merge_overlap_pct"],
                 "merge_max_drift_min": config["merge_max_drift_min"],
                 "merge_activity_types": config["merge_activity_types"],
-                "merge_watch_strategy": config["merge_watch_strategy"],
             })
         except Exception as e:
             logger.warning("Failed to persist settings to DB: %s", e)
@@ -1914,11 +1911,11 @@ async def api_unsync(request: Request, hevy_id: str):
     if delete_garmin and garmin_id:
         try:
             config = load_config()
-            from hevy2garmin.garmin import get_client
-            client = get_client(config.get("garmin_email"))
-            client.delete_activity(int(garmin_id))
+            from hevy2garmin.garmin import delete_activity, get_client
+            # The rate limiter sleeps, up to 90 s on a 429: keep it off the event loop.
+            client = await run_in_threadpool(get_client, config.get("garmin_email"))
+            await run_in_threadpool(delete_activity, client, int(garmin_id))
             garmin_deleted = True
-            logger.info("Deleted Garmin activity %s for hevy workout %s", garmin_id, hevy_id)
         except Exception as e:
             logger.warning("Failed to delete Garmin activity %s: %s", garmin_id, e)
 

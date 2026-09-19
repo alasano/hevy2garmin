@@ -33,33 +33,50 @@ def test_manual_resolution_removes_pending(tmp_path: Path) -> None:
     assert row["resolution_reason"] == "verified"
 
 
-def test_same_id_never_deletes_replacement(tmp_path: Path) -> None:
+def test_finalize_renames_describes_and_commits(tmp_path: Path) -> None:
     store = SQLiteDatabase(tmp_path / "sync.db")
-    store.claim_pending("w1", {"title": "Push", "description_enabled": False})
-    store.update_pending(
-        "w1", phase="finalizing", next_step="delete",
-        garmin_activity_id="42", watch_activity_id="42",
-    )
+    store.claim_pending("w1", {"title": "Push", "description_enabled": True, "description": "3 sets"})
+    store.update_pending("w1", phase="finalizing", next_step="rename", garmin_activity_id="42")
     client = MagicMock()
-    with patch("hevy2garmin.sync.delete_activity") as delete:
+    with patch("hevy2garmin.sync.rename_activity") as rename, patch(
+        "hevy2garmin.sync.set_description"
+    ) as describe:
         result = finalize_pending(store, client, store.get_pending("w1"))
-    assert result.status == "needs_review"
-    delete.assert_not_called()
-    assert store.get_pending("w1")["phase"] == "needs_review"
+    assert result.status == "synced"
+    rename.assert_called_once_with(client, 42, "Push")
+    describe.assert_called_once_with(client, 42, "3 sets")
+    assert store.get_pending("w1") is None
+    assert store.is_synced("w1") is True
 
 
-def test_finalize_null_watch_id_skips_delete(tmp_path: Path) -> None:
+def test_finalize_skips_the_description_when_disabled(tmp_path: Path) -> None:
     store = SQLiteDatabase(tmp_path / "sync.db")
     store.claim_pending("w1", {"title": "Push", "description_enabled": False})
-    store.update_pending(
-        "w1", phase="finalizing", next_step="delete",
-        garmin_activity_id="42", watch_activity_id=None,
-    )
-    with patch("hevy2garmin.sync.delete_activity") as delete:
+    store.update_pending("w1", phase="finalizing", next_step="rename", garmin_activity_id="42")
+    with patch("hevy2garmin.sync.rename_activity"), patch(
+        "hevy2garmin.sync.set_description"
+    ) as describe:
         result = finalize_pending(store, MagicMock(), store.get_pending("w1"))
     assert result.status == "synced"
-    delete.assert_not_called()
-    assert store.get_pending("w1") is None
+    describe.assert_not_called()
+    assert store.is_synced("w1") is True
+
+
+def test_finalize_resumes_from_the_failed_step(tmp_path: Path) -> None:
+    store = SQLiteDatabase(tmp_path / "sync.db")
+    store.claim_pending("w1", {"title": "Push", "description_enabled": True, "description": "3 sets"})
+    store.update_pending("w1", phase="finalizing", next_step="rename", garmin_activity_id="42")
+    with patch("hevy2garmin.sync.rename_activity") as rename, patch(
+        "hevy2garmin.sync.set_description", side_effect=[RuntimeError("Garmin 500"), None]
+    ):
+        first = finalize_pending(store, MagicMock(), store.get_pending("w1"))
+        parked = store.get_pending("w1")
+        second = finalize_pending(store, MagicMock(), parked)
+    assert first.status == "processing"
+    assert parked["next_step"] == "description"
+    assert "Garmin 500" in parked["last_error"]
+    assert second.status == "synced"
+    assert rename.call_count == 1
     assert store.is_synced("w1") is True
 
 

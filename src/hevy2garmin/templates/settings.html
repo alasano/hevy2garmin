@@ -238,19 +238,6 @@
                         </div>
                     </div>
                 </div>
-                <div class="form-grid">
-                    <div class="form-group">
-                        <label class="form-label" for="merge_watch_strategy">Workouts recorded on a watch</label>
-                        <select class="form-input" id="merge_watch_strategy" name="merge_watch_strategy">
-                            <option value="merge" {{ 'selected' if config.get('merge_watch_strategy', 'merge') == 'merge' }}>Merge sets into the watch activity (keeps watch metrics + names, recommended)</option>
-                            <option value="replace" {{ 'selected' if config.get('merge_watch_strategy', 'merge') == 'replace' }}>Replace with one named activity (named exercises, loses watch metrics)</option>
-                            <option value="describe" {{ 'selected' if config.get('merge_watch_strategy', 'merge') == 'describe' }}>Keep the watch activity, list exercises in its description</option>
-                        </select>
-                        <div class="form-hint">
-                            After a workout your watch recorded, all three give you a single activity, they differ in what they keep. <strong>Merge sets</strong> (recommended) pushes your sets, reps, and weights into the watch activity and keeps it, so you keep the watch's heart rate and native metrics like training effect and body battery, and your exercises show with their names and full set data. <strong>Replace</strong> uploads a fresh named activity with your heart rate and deletes the watch copy, so you get named exercises but lose the watch-only metrics. <strong>Keep + describe</strong> leaves the watch activity untouched and only lists the exercises in its description, with no structured sets.
-                        </div>
-                    </div>
-                </div>
 
                 <hr style="border: none; border-top: 1px solid var(--border); margin: 20px 0;">
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
 from hevy2garmin._isotime import parse_iso
 from pathlib import Path
 
@@ -61,12 +60,10 @@ class SQLiteDatabase(Database):
                 next_step TEXT,
                 upload_id TEXT,
                 garmin_activity_id TEXT,
-                watch_activity_id TEXT,
                 pre_upload_ids TEXT NOT NULL DEFAULT '[]',
                 payload TEXT NOT NULL DEFAULT '{}',
                 resolution_source TEXT,
                 attempt_count INTEGER NOT NULL DEFAULT 0,
-                delete_attempt_count INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
                 locked_until TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -525,7 +522,7 @@ class SQLiteDatabase(Database):
         return [self._pending_dict(row) for row in rows]
 
     def update_pending(self, hevy_id: str, **changes) -> None:
-        allowed = {"phase", "next_step", "upload_id", "garmin_activity_id", "watch_activity_id", "pre_upload_ids", "payload", "resolution_source", "attempt_count", "delete_attempt_count", "last_error", "locked_until"}
+        allowed = {"phase", "next_step", "upload_id", "garmin_activity_id", "pre_upload_ids", "payload", "resolution_source", "attempt_count", "last_error", "locked_until"}
         changes = {k: v for k, v in changes.items() if k in allowed}
         if not changes:
             return
@@ -590,7 +587,7 @@ class SQLiteDatabase(Database):
         }
         try:
             pending = conn.execute(
-                f"SELECT hevy_id, phase, next_step, last_error, attempt_count, delete_attempt_count, garmin_activity_id FROM pending_uploads WHERE hevy_id IN ({placeholders})",
+                f"SELECT hevy_id, phase, next_step, last_error, attempt_count, garmin_activity_id FROM pending_uploads WHERE hevy_id IN ({placeholders})",
                 hevy_ids,
             ).fetchall()
         except sqlite3.OperationalError:
@@ -602,7 +599,6 @@ class SQLiteDatabase(Database):
                     "kind": "pending", "status": row["phase"],
                     "next_step": row["next_step"], "last_error": row["last_error"],
                     "attempt_count": row["attempt_count"],
-                    "delete_attempt_count": row["delete_attempt_count"],
                     "garmin_activity_id": row["garmin_activity_id"],
                 }
         return states

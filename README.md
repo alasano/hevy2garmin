@@ -317,19 +317,6 @@ Every attempt is merge-only: the defaults look for the watch activity every five
 
 `CRON_SECRET` must be set for the endpoint to work at all — with no secret configured it answers `503` rather than accepting unauthenticated calls, since it is internet-facing and is deliberately exempt from the dashboard password. At most `WEBHOOK_MAX_INFLIGHT` (4) staged syncs run at once; past that a request is acknowledged but not staged, because the ones already running plus auto-sync cover the work.
 
-### Removing duplicates from intervals.icu
-
-The `replace` watch strategy deletes the watch recording from Garmin once the named activity is uploaded, so Garmin ends up with one activity. Garmin deletions do not propagate, though: if you also sync Garmin to [intervals.icu](https://intervals.icu), the copy it already pulled stays there, and every merged workout leaves a duplicate behind.
-
-Set both of these and hevy2garmin deletes it there as well, matched on the Garmin activity id:
-
-```
-INTERVALS_API_KEY=
-INTERVALS_ATHLETE_ID=
-```
-
-Entirely opt-in — with either one missing the step is skipped. It also never fails a sync: intervals.icu being down or slow is logged and ignored, because the Garmin upload has already succeeded by that point.
-
 ### Running as a non-root user
 
 The image runs as uid 999. Named volumes (what the compose file uses) are handled automatically. If you use **bind mounts** instead — the `-v ~/.hevy2garmin:/root/.hevy2garmin` form shown in the Docker section — grant that user access once:
@@ -385,12 +372,12 @@ This is visible in the activity details on Garmin Connect and any connected apps
 
 ## Enhance Watch Activities (opt-in)
 
-By default, hevy2garmin creates a new Garmin activity from your Hevy workout using your watch's daily HR monitoring (~2 min sampling). This works without any behavior change. When a matching watch-recorded workout is found and the **Replace** strategy is selected, hevy2garmin instead downloads that activity's high-resolution HR, saves a durable backup, embeds it in the named Hevy FIT, uploads the replacement, and only then deletes the watch copy. If neither the original FIT nor an existing backup is available, replacement stops and preserves the watch activity.
+By default, hevy2garmin creates a new Garmin activity from your Hevy workout using your watch's daily HR monitoring (~2 min sampling). This works without any behavior change.
 
-If you start a **Strength Training** activity on your Garmin watch when you hit the gym, you can enable **Enhance Watch Activities** in the config (`"merge_mode": true`). hevy2garmin detects the matching watch activity and combines it with your Hevy data using the configured watch strategy. The in-place strategies keep the original watch activity; Replace creates one named composite activity. Depending on the selected strategy, benefits include:
+If you start a **Strength Training** activity on your Garmin watch when you hit the gym, you can enable **Enhance Watch Activities** in the config (`"merge_mode": true`). hevy2garmin detects the matching watch activity and pushes your Hevy sets, reps and weights into it in place, so the original watch activity stays and nothing is uploaded or deleted. Benefits include:
 
 - **1-second HR sampling** (vs ~2 min in continuous monitoring)
-- **Training effect, EPOC, recovery time, and VO2max impact** remain when an in-place strategy keeps the original activity (Garmin does not transfer these to an uploaded replacement)
+- **Training effect, EPOC, recovery time, and VO2max impact** stay, because the original watch activity is kept (Garmin does not compute these for an uploaded activity)
 - **Correct Strava timestamps** (watch-synced activities use the real time, not upload time)
 - **Single activity** on Garmin (no duplicate)
 

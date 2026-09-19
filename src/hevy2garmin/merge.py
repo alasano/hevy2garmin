@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from hevy2garmin._isotime import parse_iso
 
 from hevy2garmin.garmin import (
@@ -35,11 +35,10 @@ _consecutive_failures = 0
 
 
 class MergeFailed(RuntimeError):
-    """The sets could not be pushed into a watch activity under the "merge" strategy.
+    """The sets could not be pushed into a watch activity.
 
     Raised instead of returning "not merged", so the workout's sync fails and is
-    retried. Its own type lets the replace strategy's in-place fallback catch
-    this and nothing else: a Garmin listing or auth error must still propagate.
+    retried instead of falling through to the start-time check.
     """
 
 
@@ -49,13 +48,10 @@ class MergeResult:
     merged: bool
     activity_id: int | None = None
     fallback_reason: str | None = None
-    # Set when the "replace" strategy applies, or when the read-back after a
-    # push shows Garmin dropped the exercise names (#159). Tells the caller to
-    # upload a SEPARATE named activity instead of deduping against the match.
+    # Set when the read-back after a push shows Garmin dropped the exercise
+    # names (#159). Tells the caller to upload a SEPARATE named activity instead
+    # of deduping against the match.
     force_fresh_upload: bool = False
-    # Watch activity id to delete AFTER a successful fresh upload, so the workout
-    # ends up as a single named activity ("replace" strategy, #159).
-    delete_after_upload: int | None = None
 
 
 def _names_applied(client, activity_id) -> bool:
@@ -387,7 +383,6 @@ def attempt_merge(
     overlap_threshold: float = 0.70,
     max_drift_minutes: int = 20,
     activity_types: set[str] | None = None,
-    watch_strategy: str = "replace",
 ) -> MergeResult:
     """Try to merge Hevy exercise data into a matching Garmin activity.
 
@@ -409,58 +404,24 @@ def attempt_merge(
         return MergeResult(merged=False, fallback_reason="Matched activity missing required fields")
 
     # A match hevy2garmin did not create (FIT manufacturer other than
-    # "DEVELOPMENT": a watch, "GARMIN", etc.) is handled per watch_strategy.
-    # Pushed exercise names render on such an activity since sets carry
-    # probability 100 (#325), so "merge" is the configured default; "replace"
-    # and "describe" remain for users who prefer them.
+    # "DEVELOPMENT": a watch, "GARMIN", etc.) is merged in place, keeping all its
+    # native metrics (HR, training effect, training load, body battery). Pushed
+    # exercise names render on such an activity since sets carry probability
+    # 100 (#325).
     manufacturer = str(match.get("manufacturer") or "").upper()
     is_watch = bool(manufacturer) and manufacturer != "DEVELOPMENT"
+
     # "Not merged" sends a full sync to its start-time fallback, which finds this
     # same watch activity, renames it without sets and records it as an upload
-    # for good. For a watch activity under "merge", fail the workout instead so
-    # the next sync tries the merge again.
-    must_merge = is_watch and watch_strategy == "merge"
-
+    # for good. For a watch activity, fail the workout instead so the next sync
+    # tries the merge again.
     if _circuit_breaker_tripped():
-        if must_merge:
+        if is_watch:
             raise MergeFailed("Circuit breaker: too many PUT failures")
         return MergeResult(merged=False, fallback_reason="Circuit breaker: too many PUT failures")
-    if is_watch and watch_strategy == "describe":
-        # Keep the single watch activity (its HR + device metrics) and just list
-        # the exercises in its description. No push and no upload, so it stays
-        # one activity with its own sets untouched.
-        logger.info(
-            "  Match %s recorded by %s; enriching its description (watch_strategy=describe)",
-            activity_id, manufacturer,
-        )
-        try:
-            _apply_name_and_description(client, activity_id, hevy_workout)
-        except Exception as e:
-            logger.warning("Rename/description failed for %s: %s", activity_id, e)
-        return MergeResult(merged=True, activity_id=activity_id)
-
-    if is_watch and watch_strategy == "replace":
-        # Upload one named activity, then delete the watch recording, so the
-        # workout shows up exactly once with named exercises.
-        logger.info(
-            "  Match %s recorded by %s; uploading a named activity and removing the watch copy (watch_strategy=replace)",
-            activity_id, manufacturer,
-        )
-        return MergeResult(
-            merged=False,
-            force_fresh_upload=True,
-            delete_after_upload=activity_id,
-            fallback_reason=f"activity recorded by {manufacturer}; replacing it with a named upload",
-        )
 
     if is_watch:
-        # watch_strategy == "merge": push the named sets/reps/weights into the
-        # single watch activity, keeping all its native metrics (HR, training
-        # effect, training load, body battery). One activity, no upload/delete.
-        logger.info(
-            "  Match %s recorded by %s; merging sets in place (watch_strategy=merge)",
-            activity_id, manufacturer,
-        )
+        logger.info("  Match %s recorded by %s; merging sets in place", activity_id, manufacturer)
 
     # Back up the activity's own sets, once. On a second merge (a workout
     # unsynced and synced again) the activity already holds pushed Hevy sets,
@@ -504,15 +465,15 @@ def attempt_merge(
         if failure is not None:
             _consecutive_failures += 1
             logger.error("PUT exerciseSets failed for activity %s: %s", activity_id, failure)
-            if must_merge:
+            if is_watch:
                 raise MergeFailed(str(failure)) from failure
             return MergeResult(merged=False, fallback_reason=f"PUT failed: {failure}")
 
     # Verify the names on hevy2garmin's own uploads (DEVELOPMENT) and fall back
-    # to a named upload if Garmin dropped them. For watch_strategy="merge" the
-    # watch activity is kept whatever the read-back says: a failed verify would
-    # restore the sets and upload a second activity next to it.
-    if not (is_watch and watch_strategy == "merge") and not _names_applied(client, activity_id):
+    # to a named upload if Garmin dropped them. A watch activity is kept whatever
+    # the read-back says: a failed verify would restore the sets and upload a
+    # second activity next to it.
+    if not is_watch and not _names_applied(client, activity_id):
         logger.info(
             "  Exercise names not applied on activity %s, restoring and uploading a named activity",
             activity_id,

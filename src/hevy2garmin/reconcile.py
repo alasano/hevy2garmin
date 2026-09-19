@@ -4,8 +4,7 @@ Two concerns live here:
 
 - :func:`detect_duplicates` — detect (log-only) duplicate Garmin activities left
   by past sync races: hevy2garmin uploaded a fresh activity before the watch copy
-  landed, leaving two activities for one workout. Nothing is deleted — deletion
-  is a separate, opt-in feature.
+  landed, leaving two activities for one workout. Nothing is deleted.
 - :func:`reconcile_missing_routine_workouts` — flag routine planned workouts the
   user deleted on Garmin, so the dashboard stops showing them as synced.
 """

@@ -18,7 +18,6 @@ from hevy2garmin.garmin import (
     activity_matches_start_time,
     activities_for_workout,
     create_workout,
-    delete_activity,
     delete_workout,
     find_activity_by_start_time,
     generate_description,
@@ -37,7 +36,7 @@ from hevy2garmin.routine import (
     routine_to_garmin_workout,
     workout_content_hash,
 )
-from hevy2garmin.merge import MergeFailed, MergeResult, attempt_merge, reset_circuit_breaker
+from hevy2garmin.merge import attempt_merge, reset_circuit_breaker
 from hevy2garmin.reconcile import reconcile_missing_routine_workouts
 from hevy2garmin.db_interface import Database
 
@@ -116,43 +115,16 @@ def finalize_pending(store, client, pending: dict) -> SyncOneResult:
     wid = pending["hevy_id"]
     payload = pending.get("payload") or {}
     activity_id = int(pending["garmin_activity_id"])
-    watch_id = pending.get("watch_activity_id")
     step = pending.get("next_step") or "rename"
     try:
         if step == "rename":
             rename_activity(client, activity_id, payload.get("title", "Workout"))
-            step = "description" if payload.get("description_enabled") else ("delete" if watch_id else "commit")
+            step = "description" if payload.get("description_enabled") else "commit"
             store.update_pending(wid, phase="finalizing", next_step=step, last_error=None)
         if step == "description":
             set_description(client, activity_id, payload.get("description", ""))
-            step = "delete" if watch_id else "commit"
+            step = "commit"
             store.update_pending(wid, next_step=step, last_error=None)
-        if step == "delete":
-            if not watch_id:
-                step = "commit"
-                store.update_pending(wid, next_step=step, last_error=None)
-            elif int(watch_id) == activity_id:
-                store.update_pending(wid, phase="needs_review", last_error="replacement equals watch activity; deletion blocked")
-                return SyncOneResult(status="needs_review", activity_id=activity_id)
-            else:
-                try:
-                    delete_activity(client, int(watch_id))
-                except Exception as exc:
-                    attempts = int(pending.get("delete_attempt_count") or 0) + 1
-                    phase = "needs_review" if attempts >= 3 else "finalizing"
-                    store.update_pending(wid, phase=phase, next_step="delete", delete_attempt_count=attempts, last_error=str(exc)[:1000])
-                    return SyncOneResult(status="needs_review" if phase == "needs_review" else "processing", activity_id=activity_id)
-                # Remove it from intervals.icu too, so the deleted watch copy
-                # doesn't linger there as a duplicate of the named activity
-                # that replaces it. No-op unless ICU credentials are set, and
-                # never raises — a failure here must not fail the sync.
-                workout_start = (payload.get("workout") or {}).get("start_time", "")
-                if workout_start:
-                    from hevy2garmin.intervals_icu import try_delete_icu_activity
-
-                    try_delete_icu_activity(int(watch_id), workout_start)
-                step = "commit"
-                store.update_pending(wid, next_step=step, last_error=None)
         _complete(store, wid, payload, activity_id)
         return SyncOneResult(status="synced", activity_id=activity_id, sync_method=payload.get("sync_method", "upload"), merge_fallback=payload.get("merge_fallback", False), calories=payload.get("calories"), avg_hr=payload.get("avg_hr"))
     except Exception as exc:
@@ -181,7 +153,7 @@ def reconcile_pending(store, client, hevy_id: str) -> SyncOneResult:
                 resolved = int(str(raw_id).strip("'\"")) if raw_id else None
             except Exception:
                 continue
-            if resolved and str(resolved) not in {str(pending.get("watch_activity_id")), *map(str, pending.get("pre_upload_ids", []))}:
+            if resolved and str(resolved) not in set(map(str, pending.get("pre_upload_ids", []))):
                 store.update_pending(hevy_id, phase="finalizing", next_step="rename", garmin_activity_id=str(resolved), resolution_source="upload_id", last_error=None)
                 return finalize_pending(store, client, store.get_pending(hevy_id))
     phase = pending.get("phase")
@@ -205,8 +177,6 @@ def reconcile_pending(store, client, hevy_id: str) -> SyncOneResult:
         store.update_pending(hevy_id, last_error=str(exc)[:1000])
         return SyncOneResult(status="processing")
     excluded = {str(x) for x in pending.get("pre_upload_ids", [])}
-    if pending.get("watch_activity_id"):
-        excluded.add(str(pending["watch_activity_id"]))
     candidates = [a for a in activities if _activity_id(a) and str(_activity_id(a)) not in excluded]
     start_time = workout.get("start_time") or workout.get("startTime", "")
     # Snapshot-only recovery is deliberately strict: exactly one matching
@@ -347,13 +317,10 @@ def sync_one_workout(
     merge_overlap_pct = cfg.get("merge_overlap_pct", 70) / 100.0
     merge_max_drift_min = cfg.get("merge_max_drift_min", 20)
     merge_activity_types = set(cfg.get("merge_activity_types", ["strength_training"]))
-    merge_watch_strategy = cfg.get("merge_watch_strategy", "merge")
     description_enabled = cfg.get("description_enabled", True)
     hr_fusion_on = cfg.get("hr_fusion", {}).get("enabled", True)
 
     merge_forced_fresh = False
-    merge_delete_id = None
-    protected_source_hr = None
 
     if merge_mode and garmin_client and not dry_run:
         merge_result = attempt_merge(
@@ -363,7 +330,6 @@ def sync_one_workout(
             overlap_threshold=merge_overlap_pct,
             max_drift_minutes=merge_max_drift_min,
             activity_types=merge_activity_types,
-            watch_strategy=merge_watch_strategy,
         )
         if merge_result.merged:
             fit_stats = _estimate_fit_stats(workout)
@@ -388,7 +354,6 @@ def sync_one_workout(
 
         logger.info("  Merge fallback: %s", merge_result.fallback_reason)
         merge_forced_fresh = merge_result.force_fresh_upload
-        merge_delete_id = merge_result.delete_after_upload
         merge_fallback = True
 
         # merge_only: the caller (the webhook retry loop) wants a merge or
@@ -404,99 +369,13 @@ def sync_one_workout(
     else:
         merge_fallback = False
 
-    if merge_delete_id is not None and not dry_run:
-        # Replace wants to delete the watch activity. That is only safe once the
-        # watch's high-resolution HR is durably backed up so it can be embedded
-        # in the named replacement. Runs even with HR embedding disabled:
-        # disabling fusion must not discard the only recoverable recording.
-        from hevy2garmin.hr import HRBackupError, backup_activity_hr
-
-        try:
-            protected_source_hr = backup_activity_hr(
-                merge_store, garmin_client, workout, merge_delete_id, _hr_limiter,
-            ) or None
-        except HRBackupError as exc:
-            logger.warning(
-                "  ⚠ Could not durably back up HR from watch activity %s: %s",
-                merge_delete_id, exc,
-            )
-            protected_source_hr = None
-
-        if protected_source_hr is None:
-            # The watch's hi-res HR could not be preserved (e.g. the FIT has no
-            # per-record HR, or the download failed). Deleting the watch copy
-            # would lose that HR for good, so instead of aborting the whole sync
-            # (#244 regression) fall back to merging the sets into the watch
-            # activity in place: the watch and its HR stay and the named sets
-            # land. Always syncs and never loses HR.
-            logger.info(
-                "  ⚠ Hi-res HR unavailable for watch activity %s; keeping it and "
-                "merging sets in place instead of replacing",
-                merge_delete_id,
-            )
-            try:
-                fallback = attempt_merge(
-                    garmin_client,
-                    workout,
-                    merge_store,
-                    overlap_threshold=merge_overlap_pct,
-                    max_drift_minutes=merge_max_drift_min,
-                    activity_types=merge_activity_types,
-                    watch_strategy="merge",
-                )
-            except MergeFailed as exc:
-                # "Retry the merge" does not apply here: this path must always
-                # sync, so fall through to the fresh upload below, which skips
-                # the start-time check and leaves the watch copy alone. A failed
-                # listing is not caught: uploading next to a watch activity that
-                # could not be seen is what it would lead to.
-                fallback = MergeResult(merged=False, fallback_reason=str(exc))
-            if fallback.merged:
-                fit_stats = _estimate_fit_stats(workout)
-                merge_store.mark_synced(
-                    hevy_id=wid,
-                    garmin_activity_id=str(fallback.activity_id),
-                    title=title,
-                    calories=fit_stats.get("calories"),
-                    avg_hr=fit_stats.get("avg_hr"),
-                    hevy_updated_at=workout.get("updated_at"),
-                    sync_method="merge",
-                )
-                logger.info(
-                    "  ⚡ Merged sets into watch activity %s (HR preserved in place)",
-                    fallback.activity_id,
-                )
-                return SyncOneResult(
-                    status="synced",
-                    activity_id=fallback.activity_id,
-                    sync_method="merge",
-                    merged=True,
-                    calories=fit_stats.get("calories"),
-                    avg_hr=fit_stats.get("avg_hr"),
-                )
-            # In-place merge also failed. Do NOT delete the watch activity —
-            # leave it intact and upload a fresh named activity alongside it, so
-            # the workout still syncs and nothing is lost.
-            logger.warning(
-                "  In-place merge fallback failed (%s); uploading a named activity "
-                "without removing the watch copy",
-                fallback.fallback_reason,
-            )
-            merge_delete_id = None
-            merge_forced_fresh = True
-
     hr_samples = None
     if not dry_run and hr_fusion_on:
-        from hevy2garmin.hr import extract_hevy_hr, hr_for_sync, merge_hr_sources
+        from hevy2garmin.hr import hr_for_sync
 
-        if protected_source_hr:
-            hr_samples = merge_hr_sources(
-                extract_hevy_hr(workout), protected_source_hr
-            ) or None
-        else:
-            hr_samples = hr_for_sync(
-                merge_store, garmin_client, workout, cfg, _hr_limiter
-            )
+        hr_samples = hr_for_sync(
+            merge_store, garmin_client, workout, cfg, _hr_limiter
+        )
         if not hr_samples:
             # One retry — the watch's daily HR for this window may not
             # have settled on the first try.
@@ -525,13 +404,8 @@ def sync_one_workout(
 
         existing_id = None
         uploaded = False
-        exclude_ids = [merge_delete_id] if merge_delete_id else None
         if start_time and not force_upload and not merge_forced_fresh:
-            existing_id = find_activity_by_start_time(
-                garmin_client,
-                start_time,
-                exclude_activity_ids=exclude_ids,
-            )
+            existing_id = find_activity_by_start_time(garmin_client, start_time)
 
         if existing_id:
             logger.info("  Activity already on Garmin (%s), skipping upload", existing_id)
@@ -560,14 +434,9 @@ def sync_one_workout(
             except Exception:
                 merge_store.delete_pending(wid)
                 raise
-            merge_store.update_pending(wid, pre_upload_ids=snapshot_ids, watch_activity_id=str(merge_delete_id) if merge_delete_id else None, phase="processing", attempt_count=1)
+            merge_store.update_pending(wid, pre_upload_ids=snapshot_ids, phase="processing", attempt_count=1)
             try:
-                upload_result = upload_fit(
-                    garmin_client,
-                    fit_path,
-                    workout_start=start_time,
-                    exclude_activity_ids=exclude_ids,
-                )
+                upload_result = upload_fit(garmin_client, fit_path, workout_start=start_time)
             except GarminUploadRejected as exc:
                 merge_store.update_pending(wid, phase="failed", last_error=str(exc)[:1000])
                 return SyncOneResult(status="failed", merge_fallback=merge_fallback)
@@ -579,7 +448,7 @@ def sync_one_workout(
             activity_id = int(raw_id) if raw_id and str(raw_id).isdigit() else None
             upload_id = upload_result.get("upload_id")
             merge_store.update_pending(wid, upload_id=str(upload_id) if upload_id else None, last_error=None)
-            if activity_id and str(activity_id) not in set(snapshot_ids) and (not merge_delete_id or activity_id != int(merge_delete_id)):
+            if activity_id and str(activity_id) not in set(snapshot_ids):
                 merge_store.update_pending(wid, phase="finalizing", next_step="rename", garmin_activity_id=str(activity_id), resolution_source="response")
                 if isinstance(merge_store, Database):
                     pending_after = merge_store.get_pending(wid)
@@ -587,8 +456,7 @@ def sync_one_workout(
                     pending_after = {
                         "hevy_id": wid, "phase": "finalizing", "next_step": "rename",
                         "garmin_activity_id": str(activity_id),
-                        "watch_activity_id": str(merge_delete_id) if merge_delete_id else None,
-                        "payload": pending_payload, "delete_attempt_count": 0,
+                        "payload": pending_payload,
                     }
                 finalized = finalize_pending(merge_store, garmin_client, pending_after)
                 finalized.no_hr = bool(hr_fusion_on and not hr_samples)

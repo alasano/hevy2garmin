@@ -283,9 +283,9 @@ def cmd_unsync(args: argparse.Namespace) -> None:
     if args.delete and garmin_id:
         try:
             config = load_config()
-            from hevy2garmin.garmin import get_client
+            from hevy2garmin.garmin import delete_activity, get_client
             client = get_client(config.get("garmin_email"))
-            client.delete_activity(int(garmin_id))
+            delete_activity(client, int(garmin_id))
             print(f"  ✓ Deleted Garmin activity {garmin_id}")
         except Exception as e:
             print(f"  ✗ Failed to delete from Garmin: {e}")

@@ -478,7 +478,7 @@ class TestAttemptMerge:
     @patch("hevy2garmin.merge.push_exercise_sets")
     @patch("hevy2garmin.merge.rename_activity")
     def test_names_dropped_forces_fresh_upload(self, mock_rename, mock_push, mock_get_sets, mock_find, _sleep):
-        """Watch activity drops the names -> merged=False, force_fresh_upload=True (#159)."""
+        """Garmin drops the names on one of our own uploads -> merged=False, force_fresh_upload=True (#159)."""
         mock_find.return_value = _make_garmin_activity()
         # backup read, then verify read shows the names were dropped
         mock_get_sets.side_effect = [{"exerciseSets": []}, _DROPPED]
@@ -491,7 +491,7 @@ class TestAttemptMerge:
         assert result.force_fresh_upload is True
         # PUT happened twice: the merge push + the restore
         assert mock_push.call_count == 2
-        # we did NOT rename the watch activity since we abandoned the merge
+        # we did NOT rename the activity since we abandoned the merge
         mock_rename.assert_not_called()
 
     @patch("hevy2garmin.merge.find_matching_garmin_activity")
@@ -523,7 +523,7 @@ class TestAttemptMerge:
         database.set_app_config.side_effect = stored.__setitem__
 
         for _ in range(2):
-            assert attempt_merge(MagicMock(), HEVY_WORKOUT, database, watch_strategy="merge").merged
+            assert attempt_merge(MagicMock(), HEVY_WORKOUT, database).merged
 
         assert stored["merge_backup_12345"]["original_sets"] == watch_sets
         assert mock_push.call_count == 2
@@ -559,50 +559,8 @@ class TestAttemptMerge:
 
         for _ in range(4):
             with pytest.raises(MergeFailed):
-                attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
+                attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
         assert mock_push.call_count == 3
-
-
-@patch("hevy2garmin.merge.find_matching_garmin_activity")
-@patch("hevy2garmin.merge.push_exercise_sets")
-def test_watch_replace_strategy_forces_upload_and_marks_for_delete(mock_push, mock_find):
-    """Default 'replace' strategy: a watch match forces a named upload and flags
-    the watch activity for deletion, so the workout ends up as one activity (#159)."""
-    reset_circuit_breaker()
-    act = _make_garmin_activity()
-    act["manufacturer"] = "GARMIN"  # recorded on a watch
-    mock_find.return_value = act
-
-    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())  # default replace
-
-    assert result.merged is False
-    assert result.force_fresh_upload is True
-    assert result.delete_after_upload == 12345  # the watch activity id
-    mock_push.assert_not_called()  # we never push to a watch activity
-
-
-@patch("hevy2garmin.merge.find_matching_garmin_activity")
-@patch("hevy2garmin.merge.push_exercise_sets")
-@patch("hevy2garmin.merge.rename_activity")
-@patch("hevy2garmin.merge.set_description")
-@patch("hevy2garmin.merge.generate_description")
-def test_watch_describe_strategy_enriches_in_place(mock_gen, mock_desc, mock_rename, mock_push, mock_find):
-    """'describe' strategy keeps the single watch activity, enriching its name and
-    description, with no push and no fresh upload."""
-    reset_circuit_breaker()
-    act = _make_garmin_activity()
-    act["manufacturer"] = "GARMIN"
-    mock_find.return_value = act
-    mock_gen.return_value = "Dumbbell Row: 3 sets"
-
-    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="describe")
-
-    assert result.merged is True
-    assert result.activity_id == 12345
-    assert result.force_fresh_upload is False
-    mock_push.assert_not_called()      # never pushes sets to a watch activity
-    mock_rename.assert_called_once()   # but does rename + describe it
-    mock_desc.assert_called_once()
 
 
 @patch("hevy2garmin.merge.time.sleep")
@@ -634,9 +592,9 @@ def test_development_upload_still_merges(mock_desc, mock_rename, mock_push, mock
 @patch("hevy2garmin.merge.rename_activity")
 @patch("hevy2garmin.merge.set_description")
 @patch("hevy2garmin.merge.generate_description")
-def test_watch_merge_strategy_pushes_and_keeps(mock_gen, mock_desc, mock_rename, mock_push, mock_get, mock_find, _sleep):
-    """'merge' strategy pushes sets into the watch activity and keeps it as one
-    activity (merged=True), without verifying names or forcing a fresh upload (#159)."""
+def test_watch_activity_is_merged_in_place(mock_gen, mock_desc, mock_rename, mock_push, mock_get, mock_find, _sleep):
+    """A watch match gets the sets pushed into it and is kept as one activity
+    (merged=True), without verifying names or forcing a fresh upload (#159)."""
     reset_circuit_breaker()
     act = _make_garmin_activity()
     act["manufacturer"] = "GARMIN"
@@ -644,12 +602,11 @@ def test_watch_merge_strategy_pushes_and_keeps(mock_gen, mock_desc, mock_rename,
     mock_get.return_value = {"exerciseSets": []}  # only the backup read; verify is skipped
     mock_gen.return_value = "Dumbbell Row: 3 sets"
 
-    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
+    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
 
     assert result.merged is True
     assert result.activity_id == 12345
     assert result.force_fresh_upload is False
-    assert result.delete_after_upload is None
     mock_push.assert_called_once()     # pushed the sets into the watch activity
     mock_rename.assert_called_once()   # renamed + described it in place
 
@@ -692,7 +649,7 @@ def test_subcategory_400_retries_without_names(mock_gen, mock_desc, mock_rename,
     sets still land (merged=True), instead of dropping the entire merge."""
     reset_circuit_breaker()
     act = _make_garmin_activity()
-    act["manufacturer"] = "GARMIN"          # watch activity, merge strategy skips the name-verify
+    act["manufacturer"] = "GARMIN"          # a watch activity skips the name-verify
     mock_find.return_value = act
     mock_get.return_value = {"exerciseSets": []}
     mock_gen.return_value = "Bench: 3 sets"
@@ -708,7 +665,7 @@ def test_subcategory_400_retries_without_names(mock_gen, mock_desc, mock_rename,
 
     mock_push.side_effect = push_side_effect
 
-    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
+    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
 
     assert result.merged is True
     assert len(calls) >= 2  # retried after the subcategory rejection
@@ -732,7 +689,7 @@ def test_non_subcategory_error_is_not_retried(mock_push, mock_get, mock_find, _s
     mock_get.return_value = {"exerciseSets": []}
     mock_push.side_effect = RuntimeError("connection reset by peer")
 
-    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
+    result = attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
 
     assert result.merged is False
     assert "PUT failed" in result.fallback_reason
@@ -754,7 +711,7 @@ def test_failed_push_into_a_watch_activity_fails_the_workout(mock_push, mock_get
     mock_push.side_effect = RuntimeError("connection reset by peer")
 
     with pytest.raises(MergeFailed, match="connection reset by peer"):
-        attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
+        attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock())
     mock_push.assert_called_once()   # no retry
 
 

@@ -89,7 +89,6 @@ def upload_fit(
     client: Garmin,
     fit_path: str | Path,
     workout_start: str | None = None,
-    exclude_activity_ids: list[int | str] | set[int | str] | None = None,
 ) -> dict:
     """Upload a FIT file to Garmin Connect.
 
@@ -97,9 +96,6 @@ def upload_fit(
         client: Authenticated Garmin client.
         fit_path: Path to the .fit file.
         workout_start: ISO-8601 start time for matching the uploaded activity.
-        exclude_activity_ids: Activities that existed before the upload. These
-            must not be mistaken for the newly imported activity — not even
-            when Garmin names one of them in the import result itself.
 
     Returns dict with upload_id and activity_id (if found).
     """
@@ -143,33 +139,13 @@ def upload_fit(
     else:
         logger.info("  Upload response: %s", str(resp)[:200])
 
-    # A pre-existing activity must never be taken for the new one, even when
-    # Garmin reports it as the import "success". Under the "replace" strategy
-    # the watch copy shares the workout's start time, so Garmin can answer the
-    # import with that id instead of creating a new activity — the caller then
-    # deletes the watch copy and renames an activity that is already gone
-    # (404). Drop the echoed id and fall through to the start-time lookup.
-    if activity_id is not None and exclude_activity_ids:
-        excluded = {str(x) for x in exclude_activity_ids}
-        if str(activity_id) in excluded:
-            logger.warning(
-                "  Import result returned excluded activity %s (pre-existing duplicate); "
-                "resolving the new activity by start time instead",
-                activity_id,
-            )
-            activity_id = None
-
     # Find the activity ID for renaming (retry with backoff if needed).
     # Only match by start time — never grab "most recent activity" because
     # that can pick up an unrelated run/ride and rename the wrong thing.
     if not activity_id and workout_start:
         for attempt, wait in enumerate([3, 5, 10], 1):
             time.sleep(wait)
-            activity_id = find_activity_by_start_time(
-                client,
-                workout_start,
-                exclude_activity_ids=exclude_activity_ids,
-            )
+            activity_id = find_activity_by_start_time(client, workout_start)
             if activity_id:
                 break
             logger.info("  Activity not found yet (attempt %d/%d), retrying...", attempt, 3)
@@ -224,7 +200,6 @@ def find_activity_by_start_time(
     client: Garmin,
     target_start: str,
     window_minutes: int = 10,
-    exclude_activity_ids: list[int | str] | set[int | str] | None = None,
 ) -> int | None:
     """Find a Garmin activity matching a start time within a window.
 
@@ -247,11 +222,8 @@ def find_activity_by_start_time(
     # a second activity next to the one it could not see.
     activities = _limiter.call(client.get_activities_by_date, date_from, date_to)
 
-    excluded = {str(activity_id) for activity_id in (exclude_activity_ids or [])}
     for act in activities:
         activity_id = act.get("activityId")
-        if str(activity_id) in excluded:
-            continue
         # Only match strength training activities — skip runs, bikes, yoga, etc.
         act_type = act.get("activityType", {}).get("typeKey", "")
         if act_type and act_type not in ("strength_training", "other"):
@@ -278,11 +250,7 @@ def set_description(client: Garmin, activity_id: int, description: str) -> None:
 
 
 def delete_activity(client: Garmin, activity_id: int) -> None:
-    """Delete a Garmin activity.
-
-    Used to remove a watch-recorded activity after uploading a named
-    replacement, so the workout appears exactly once on Garmin (#159).
-    """
+    """Delete a Garmin activity, when the user asks for it while unsyncing a workout."""
     _limiter.call(client.delete_activity, activity_id)
     logger.info("  Deleted activity %s", activity_id)
 

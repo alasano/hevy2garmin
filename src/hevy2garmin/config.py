@@ -45,15 +45,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
     },
     "merge_activity_types": ["strength_training"],
-    # What to do when a workout was recorded on a watch. One activity in every
-    # case (#159):
-    #   "merge" (default): push the sets/reps/weights into the watch activity and
-    #       keep it. Keeps all watch metrics AND shows the exercise names (#325).
-    #   "replace": upload one named activity and delete the watch recording.
-    #       Named exercises, but loses watch-only metrics like training effect.
-    #   "describe": keep the watch activity, only list exercises in its
-    #       description (no structured sets).
-    "merge_watch_strategy": "merge",
 }
 
 
