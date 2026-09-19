@@ -195,13 +195,7 @@ from hevy2garmin.fit import generate_fit
 result = generate_fit(hevy_workout_dict, hr_samples=None, output_path="workout.fit")
 ```
 
-To use a Postgres backend, install with Postgres support:
-
-```bash
-pip install hevy2garmin[cloud]
-```
-
-This adds `psycopg2-binary` and enables automatic Postgres backend detection via `DATABASE_URL`.
+To store state in Postgres instead of SQLite, set `DATABASE_URL` to a `postgres://` or `postgresql://` URL.
 
 ## Getting Your Hevy API Key
 
@@ -467,7 +461,6 @@ pytest tests/ -v
 To test the Postgres backend locally:
 
 ```bash
-pip install -e ".[dev,cloud]"
 DATABASE_URL=postgresql://user:pass@localhost:5432/hevy2garmin pytest tests/ -v
 ```
 

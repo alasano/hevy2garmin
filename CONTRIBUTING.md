@@ -8,7 +8,7 @@ Thanks for your interest. This doc covers the dev loop and the release process.
 git clone https://github.com/drkostas/hevy2garmin.git
 cd hevy2garmin
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,cloud]"
+pip install -e ".[dev]"
 ```
 
 ## Running tests

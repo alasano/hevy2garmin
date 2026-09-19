@@ -332,6 +332,46 @@ class TestPostgresBackend:
         assert cached["hr_samples"][0]["hr"] == 85
 
 
+class TestDatabaseUrl:
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            ("postgres://u:p@host/db", "postgres://u:p@host/db"),
+            ("postgresql://u:p@host/db", "postgresql://u:p@host/db"),
+            ("postgresql://u:p@host/db\n", "postgresql://u:p@host/db"),  # read from a secret file
+            ("", None),  # `DATABASE_URL=` in an env file means SQLite
+            (" ", None),
+        ],
+    )
+    def test_value_is_read_from_database_url(self, monkeypatch, value: str, expected) -> None:
+        monkeypatch.setenv("DATABASE_URL", value)
+        from hevy2garmin import db
+        assert db.get_database_url() == expected
+
+    def test_a_value_that_is_not_a_postgres_url_is_an_error(self, monkeypatch) -> None:
+        """A typo must not fall back to SQLite and show an empty database."""
+        monkeypatch.setenv("DATABASE_URL", "mysql://u:p@host/db")
+        from hevy2garmin import db
+        with pytest.raises(RuntimeError, match="DATABASE_URL must start with postgres://"):
+            db.get_database_url()
+
+    @pytest.mark.parametrize("argv", [["status"], ["map", "Foo", "--category", "1", "--subcategory", "2"], ["serve"]])
+    def test_the_cli_reports_it_in_one_line(self, monkeypatch, tmp_path: Path, capsys, argv) -> None:
+        """Every command stops, also the ones that never load the config, and nothing is written."""
+        monkeypatch.setenv("DATABASE_URL", "mysql://u:p@host/db")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("sys.argv", ["hevy2garmin", *argv])
+        from hevy2garmin import cli, mapper
+        monkeypatch.setattr(mapper, "_custom_loaded", False)
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+
+        assert exit_info.value.code == 1
+        assert "Error: DATABASE_URL must start with postgres://" in capsys.readouterr().err
+        assert not list(tmp_path.rglob("*.json"))
+
+
 class TestDispatcher:
     def test_default_is_sqlite(self, monkeypatch, tmp_path: Path) -> None:
         """Without DATABASE_URL, get_db() returns SQLiteDatabase."""

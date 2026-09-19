@@ -24,8 +24,7 @@ def _local_mode(monkeypatch):
     would write to the shared test DB and pollute later load_config() reads.
     Database-backed tests opt back in by patching get_database_url/get_db.
     """
-    for var in ("DATABASE_URL", "POSTGRES_URL", "STORAGE_URL", "NEON_DATABASE_URL"):
-        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     import hevy2garmin.db as _db
 
     _db.reset()

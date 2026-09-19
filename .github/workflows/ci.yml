@@ -59,8 +59,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install package with cloud + dev dependencies
-        run: pip install -e ".[dev,cloud]"
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
 
       - name: Run tests with Postgres backend
         env:

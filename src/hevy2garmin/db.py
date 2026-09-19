@@ -18,23 +18,20 @@ if TYPE_CHECKING:
 
 _instance: Database | None = None
 
-# Check the common Postgres URL variable names so a hosted database integration
-# works without renaming its variable. Prefer pooled URLs when both are present.
-_POSTGRES_URL_VARS = [
-    "POSTGRES_URL",       # pooled (pgbouncer)
-    "DATABASE_URL",
-    "STORAGE_URL",
-    "NEON_DATABASE_URL",
-]
-
 
 def get_database_url() -> str | None:
-    """Find a Postgres connection URL from common env var names."""
-    for var in _POSTGRES_URL_VARS:
-        url = os.environ.get(var)
-        if url and ("postgres" in url or "neon" in url):
-            return url
-    return None
+    """Return the Postgres URL from DATABASE_URL, or None to use SQLite."""
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url:
+        return None
+    if not url.startswith(("postgres://", "postgresql://")):
+        # Falling back to SQLite here would hide a typo behind an empty database.
+        # The value is not echoed: it holds a password. A RuntimeError is what
+        # the CLI reports in one line.
+        raise RuntimeError(
+            "DATABASE_URL must start with postgres:// or postgresql:// (no quotes, lowercase scheme)"
+        )
+    return url
 
 
 def get_db() -> Database:

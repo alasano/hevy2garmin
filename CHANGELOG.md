@@ -9,12 +9,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - The Hevy webhook's staged sync is merge-only on every attempt and now covers the whole sync grace period: `WEBHOOK_RETRY_INTERVAL_SECONDS` defaults to 300 and `WEBHOOK_MAX_ATTEMPTS` to 24 (was 600 and 3). The last attempt used to fall back to a plain FIT upload 25 minutes after the save, which left a duplicate next to a watch activity that reached Garmin Connect later and marked the workout synced so it never merged. A workout that does not merge in that time is left to auto-sync.
 - A merge-only attempt that is still waiting for the watch activity no longer writes a sync log row, so the webhook's polling does not push real syncs off the dashboard.
+- The Postgres URL is read from `DATABASE_URL` only; `POSTGRES_URL`, `STORAGE_URL` and `NEON_DATABASE_URL` are no longer read. A `DATABASE_URL` that does not start with `postgres://` or `postgresql://` is now an error, for the server at startup and for every CLI command, instead of a silent fallback to SQLite. Key/value connection strings (`host=... dbname=...`) are not accepted; surrounding whitespace is ignored.
 - Deleting the Garmin activity while unsyncing a workout (web and CLI) goes through the Garmin rate limiter: it waits a second after the call and retries on HTTP 429.
 
 ### Removed
 - The `replace` and `describe` watch strategies and the `merge_watch_strategy` setting. A matching watch-recorded activity is always merged in place: the Hevy sets are pushed into it and it keeps its heart rate, training effect, load and recovery time. Both strategies were workarounds for Garmin dropping pushed exercise names on a watch activity, which no longer happens since sets carry probability 100. A sync never deletes a Garmin activity any more; the only deletion left is the one you ask for when unsyncing a workout.
 - The heart-rate backup that `replace` took from the watch recording before deleting it. A workout that was replaced in the past and is unsynced, deleted on Garmin and uploaded again now gets the all-day heart rate instead of the backed-up per-second series. `hr_backup_*` rows in the database are no longer read or written.
 - The intervals.icu duplicate cleanup and its variables `INTERVALS_API_KEY`, `INTERVALS_ATHLETE_ID` and `INTERVALS_BASE_URL`. It only ran after `replace` deleted a watch recording.
+- The `cloud` extra. `psycopg2-binary` and `pynacl` are already installed with the package; use `pip install hevy2garmin` and set `DATABASE_URL`.
 - The `watch_activity_id` and `delete_attempt_count` columns of `pending_uploads`. An existing database keeps them, unused. Finish or abandon any workout that is still processing or needs review before upgrading: a row that was waiting for the watch recording to be deleted is recorded as synced and the watch recording stays.
 
 ### Fixed

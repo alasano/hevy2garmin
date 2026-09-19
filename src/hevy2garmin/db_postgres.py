@@ -30,7 +30,8 @@ class PostgresDatabase(Database):
         import psycopg2
         from psycopg2.extras import RealDictCursor
 
-        # Reuse connection if still alive (avoids Neon cold-start per query)
+        # Reuse the connection if it is still alive (avoids a reconnect, and a cold
+        # start on serverless Postgres, per query)
         if self._conn_cache is not None:
             try:
                 self._conn_cache.cursor().execute("SELECT 1")

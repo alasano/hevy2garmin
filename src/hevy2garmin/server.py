@@ -2494,6 +2494,9 @@ async def cron_webhook(request: Request):
 
 def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
     import uvicorn
+    # An invalid DATABASE_URL raised inside uvicorn's startup is a traceback and
+    # exit 3; raised here it reaches the CLI's one-line error.
+    db.get_database_url()
     logging.basicConfig(
         format="%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
         level=logging.INFO, force=True,

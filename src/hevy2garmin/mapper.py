@@ -668,10 +668,12 @@ def _ensure_custom_loaded() -> None:
         return
     _custom_loaded = True
 
-    # Try DB first (database configured)
+    # Try DB first (database configured). The URL is read outside the try: an
+    # invalid DATABASE_URL is an error, not a reason to use the file.
+    from hevy2garmin.db import get_database_url, get_db
+    database_url = get_database_url()
     try:
-        from hevy2garmin.db import get_database_url, get_db
-        if get_database_url():
+        if database_url:
             _db = get_db()
             if hasattr(_db, 'get_custom_mappings'):
                 for name, (cat, subcat) in _db.get_custom_mappings().items():
@@ -701,10 +703,12 @@ def save_custom_mapping(hevy_name: str, category: int, subcategory: int) -> None
     (#142, #145). Mirrors the DB-first load path in ``_ensure_custom_loaded``.
     Falls back to the filesystem otherwise.
     """
-    # Database first
+    # Database first. The URL is read outside the try: an invalid DATABASE_URL is
+    # an error, not a reason to write the file.
+    from hevy2garmin.db import get_database_url, get_db
+    database_url = get_database_url()
     try:
-        from hevy2garmin.db import get_database_url, get_db
-        if get_database_url():
+        if database_url:
             _db = get_db()
             if hasattr(_db, "save_custom_mapping"):
                 _db.save_custom_mapping(hevy_name, category, subcategory)
