@@ -16,7 +16,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A failed Garmin activity listing is no longer read as "no matching activity" or "nothing uploaded yet". Both could end in a plain FIT uploaded next to a watch activity, or a watch activity renamed and recorded as an upload without its sets. The error now stops that workout's sync and it is retried.
 - An error during a merge-only attempt no longer hides the workout from Sync Now and cron until the next restart.
 - Sync Now no longer loops without pause when the only unsynced workout was skipped after an error.
-- A failed push of the sets into a watch activity under the merge strategy now fails that workout's sync so it is retried. It used to fall through to the start-time check, which found the same watch activity, renamed it without sets and recorded it as an upload.
+- A failed push of the sets into a watch activity under the merge strategy now fails that workout's sync so it is retried. It used to fall through to the start-time check, which found the same watch activity, renamed it without sets and recorded it as an upload. The same applies once the circuit breaker has tripped after three failed pushes in one run. The replace strategy's in-place fallback still uploads a fresh activity when that push fails.
 - Auto-sync no longer stops until restart when a sync that ran longer than the lock timeout had its lock force-released by another caller, and the webhook's merge-only polls never force-release the lock.
 - Sync Now reports a workout that was skipped after an error instead of "Everything is already synced".
 - The merge match log line reports the real overlap and start drift.

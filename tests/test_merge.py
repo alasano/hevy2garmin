@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hevy2garmin.merge import (
+    MergeFailed,
     MergeResult,
     attempt_merge,
     build_exercise_sets_payload,
@@ -533,7 +534,7 @@ class TestAttemptMerge:
         mock_push.side_effect = RuntimeError("PUT failed")
 
         for _ in range(4):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(MergeFailed):
                 attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
         assert mock_push.call_count == 3
 
@@ -726,7 +727,7 @@ def test_failed_push_into_a_watch_activity_fails_the_workout(mock_push, mock_get
     mock_get.return_value = {"exerciseSets": []}
     mock_push.side_effect = RuntimeError("connection reset by peer")
 
-    with pytest.raises(RuntimeError, match="connection reset by peer"):
+    with pytest.raises(MergeFailed, match="connection reset by peer"):
         attempt_merge(MagicMock(), HEVY_WORKOUT, MagicMock(), watch_strategy="merge")
     mock_push.assert_called_once()   # no retry
 

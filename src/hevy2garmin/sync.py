@@ -37,7 +37,7 @@ from hevy2garmin.routine import (
     routine_to_garmin_workout,
     workout_content_hash,
 )
-from hevy2garmin.merge import MergeResult, attempt_merge, reset_circuit_breaker
+from hevy2garmin.merge import MergeFailed, MergeResult, attempt_merge, reset_circuit_breaker
 from hevy2garmin.reconcile import reconcile_missing_routine_workouts
 from hevy2garmin.db_interface import Database
 
@@ -444,10 +444,12 @@ def sync_one_workout(
                     activity_types=merge_activity_types,
                     watch_strategy="merge",
                 )
-            except Exception as exc:
-                # A merge that raises means "retry the merge", but this path must
-                # always sync: fall through to the fresh upload below, which
-                # skips the start-time check and leaves the watch copy alone.
+            except MergeFailed as exc:
+                # "Retry the merge" does not apply here: this path must always
+                # sync, so fall through to the fresh upload below, which skips
+                # the start-time check and leaves the watch copy alone. A failed
+                # listing is not caught: uploading next to a watch activity that
+                # could not be seen is what it would lead to.
                 fallback = MergeResult(merged=False, fallback_reason=str(exc))
             if fallback.merged:
                 fit_stats = _estimate_fit_stats(workout)

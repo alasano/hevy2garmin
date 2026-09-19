@@ -34,6 +34,15 @@ _MAX_CONSECUTIVE_FAILURES = 3
 _consecutive_failures = 0
 
 
+class MergeFailed(RuntimeError):
+    """The sets could not be pushed into a watch activity under the "merge" strategy.
+
+    Raised instead of returning "not merged", so the workout's sync fails and is
+    retried. Its own type lets the replace strategy's in-place fallback catch
+    this and nothing else: a Garmin listing or auth error must still propagate.
+    """
+
+
 @dataclass
 class MergeResult:
     """Result of a merge attempt."""
@@ -414,7 +423,7 @@ def attempt_merge(
 
     if _circuit_breaker_tripped():
         if must_merge:
-            raise RuntimeError("Circuit breaker: too many PUT failures")
+            raise MergeFailed("Circuit breaker: too many PUT failures")
         return MergeResult(merged=False, fallback_reason="Circuit breaker: too many PUT failures")
     if is_watch and watch_strategy == "describe":
         # Keep the single watch activity (its HR + device metrics) and just list
@@ -495,7 +504,7 @@ def attempt_merge(
             _consecutive_failures += 1
             logger.error("PUT exerciseSets failed for activity %s: %s", activity_id, failure)
             if must_merge:
-                raise failure
+                raise MergeFailed(str(failure)) from failure
             return MergeResult(merged=False, fallback_reason=f"PUT failed: {failure}")
 
     # Verify the names on hevy2garmin's own uploads (DEVELOPMENT) and fall back

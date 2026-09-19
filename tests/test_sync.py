@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hevy2garmin.merge import MergeResult
+from hevy2garmin.merge import MergeFailed, MergeResult
 from hevy2garmin.sync import fetch_workouts, sync, sync_one_workout
 
 
@@ -418,7 +418,7 @@ class TestSyncOneWorkout:
                     delete_after_upload=444,
                     fallback_reason="watch replacement",
                 ),
-                RuntimeError("PUT exerciseSets failed"),
+                MergeFailed("PUT exerciseSets failed"),
             ]
 
             sync_one_workout(
@@ -435,6 +435,42 @@ class TestSyncOneWorkout:
         upload_fit.assert_called_once()
         find_existing.assert_not_called()
         garmin.delete_activity.assert_not_called()
+
+    def test_watch_replacement_does_not_upload_when_the_listing_fails(self, sample_workout: dict) -> None:
+        # Only a failed push is "merge failed, upload instead". A Garmin listing
+        # that fails means the watch activity could not be seen at all, and an
+        # upload then lands next to it.
+        store = MagicMock()
+        store.get_pending.return_value = None
+        with patch("hevy2garmin.sync.attempt_merge") as mock_merge, \
+             patch("hevy2garmin.hr.backup_activity_hr", return_value=[]), \
+             patch("hevy2garmin.sync.generate_fit") as generate_fit, \
+             patch("hevy2garmin.sync.upload_fit") as upload_fit:
+            mock_merge.side_effect = [
+                MergeResult(
+                    merged=False,
+                    force_fresh_upload=True,
+                    delete_after_upload=444,
+                    fallback_reason="watch replacement",
+                ),
+                ConnectionError("Garmin unreachable"),
+            ]
+
+            with pytest.raises(ConnectionError, match="Garmin unreachable"):
+                sync_one_workout(
+                    sample_workout,
+                    cfg={
+                        "merge_mode": True,
+                        "merge_watch_strategy": "replace",
+                        "hr_fusion": {"enabled": False},
+                    },
+                    garmin_client=MagicMock(),
+                    database=store,
+                )
+
+        generate_fit.assert_not_called()
+        upload_fit.assert_not_called()
+        store.mark_synced.assert_not_called()
 
     def test_description_disabled_skips_set_description(self, sample_workout: dict) -> None:
         with patch("hevy2garmin.sync.db") as mock_db, \
