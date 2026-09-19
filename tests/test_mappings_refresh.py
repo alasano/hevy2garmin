@@ -28,3 +28,19 @@ def test_custom_mapped_exercise_is_filtered():
         assert all(n != "Seitheben (Kurzhantel)" for n, _ in result)
     finally:
         m._custom_mappings.pop("Seitheben (Kurzhantel)", None)
+
+
+def test_a_mapping_posted_without_a_sub_id_is_generic(monkeypatch):
+    """0 is the first exercise of every category, not "no exercise"."""
+    from fastapi.testclient import TestClient
+
+    from hevy2garmin import server
+
+    saved = {}
+    monkeypatch.setattr(server, "_is_configured_cache", True)
+    monkeypatch.setattr(server.db, "get_database_url", lambda: None)
+    monkeypatch.setattr(server.db, "get_db", lambda: MagicMock())
+    monkeypatch.setattr("hevy2garmin.mapper.save_custom_mapping", lambda name, cat, sub: saved.update({name: (cat, sub)}))
+
+    TestClient(server.app).post("/api/mapping", data={"hevy_name": "Band Pull Apart", "category": "14"})
+    assert saved == {"Band Pull Apart": (14, 65535)}

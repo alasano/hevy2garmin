@@ -171,7 +171,7 @@ class TestTargetsExistInGarminConnect:
         assert self._unknown_to_garmin(TEMPLATE_TO_GARMIN) == []
 
     def test_plain_exercises_map_to_their_plain_name(self) -> None:
-        """Each was mapped to a qualified variant while Garmin lists the plain exercise."""
+        """Each pointed at a qualified variant, or at another exercise, while Garmin lists this one."""
         from hevy2garmin.mapper import fit_exercise_strings
 
         expected = {
@@ -190,8 +190,17 @@ class TestTargetsExistInGarminConnect:
             "Jump Squat": "JUMP_SQUAT",
             "Straight Leg Deadlift": "STRAIGHT_LEG_DEADLIFT",
             "Inverted Row": "INVERTED_ROW",
+            "Incline Bench Press (Smith Machine)": "INCLINE_SMITH_MACHINE_BENCH_PRESS",
+            "Upright Row (Cable)": "UPRIGHT_ROW",
+            "Crunch (Machine)": "CRUNCH",
+            "Pull Up (Assisted)": "PULL_UP",  # the machine; Garmin has no assisted name, and it is not a band
+            "Pull Up (Band)": "BANDED_PULL_UPS",
+            # A different exercise before: a straight leg deadlift, a clean and jerk, a forward lunge.
+            "Romanian Deadlift (Barbell)": "ROMANIAN_DEADLIFT",
+            "Romanian Deadlift (Dumbbell)": "ROMANIAN_DEADLIFT",
+            "Ab Scissors": "FLUTTER_KICKS",
         }
-        resolved = {name: fit_exercise_strings(*lookup_exercise(name)[:2])[1] for name in expected}
+        resolved = {name: fit_exercise_strings(*HEVY_TO_GARMIN[name])[1] for name in expected}
         assert resolved == expected
 
 

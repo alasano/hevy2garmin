@@ -443,7 +443,7 @@ async function syncNow() {
                 } else if (err.includes('Hevy API key')) {
                     text.textContent = 'Hevy API key expired. Enter a new key in Setup.';
                     result.innerHTML = '<div class="toast toast-error">Hevy API key invalid. <a href="/setup" style="color: inherit; text-decoration: underline;">Go to Setup</a></div>';
-                } else if (err.includes('Login failed') || err.includes('auth') || err.includes('OAuth') || err.includes('token')) {
+                } else if (err.includes('connection expired')) {  // the server's wording, see _do_sync_one
                     text.textContent = 'Garmin connection expired. Please reconnect from Setup.';
                     result.innerHTML = '<div class="toast toast-error">Garmin connection expired. <a href="/setup" style="color: inherit; text-decoration: underline;">Reconnect</a></div>';
                 } else {
@@ -513,13 +513,17 @@ async function syncNow() {
         result.appendChild(el);
     }
 
+    // A known hard stop (consent, keys, login) has already put its own toast,
+    // with a link, into `result`; do not repeat it as plain text.
+    const linked = !!result.innerHTML;
+
     if (synced > 0) {
         toast('success', _syncStopped
             ? synced + ' synced. Resume anytime.'
             : synced + ' workout' + (synced > 1 ? 's' : '') + ' synced to Garmin.');
-        if (errors > 0) toast('error', text.textContent);
-        setTimeout(function() { location.reload(); }, errors > 0 ? 6000 : 2000);
-    } else if (!result.innerHTML) {
+        if (errors > 0 && !linked) toast('error', text.textContent);
+        setTimeout(function() { location.reload(); }, errors > 0 || linked ? 6000 : 2000);
+    } else if (!linked) {
         toast(errors > 0 ? 'error' : '', text.textContent);
     }
 }

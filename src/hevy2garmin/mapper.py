@@ -46,7 +46,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Floor Press (Dumbbell)":                   (0, 7),    # bench_press / dumbbell_floor_press
     "Incline Bench Press (Barbell)":            (0, 8),    # bench_press / incline_barbell_bench_press
     "Incline Bench Press (Dumbbell)":           (0, 9),    # bench_press / incline_dumbbell_bench_press
-    "Incline Bench Press (Smith Machine)":      (0, 8),    # bench_press / incline_barbell_bench_press (closest)
+    "Incline Bench Press (Smith Machine)":      (0, 10),  # bench_press / incline_smith_machine_bench_press
     "Incline Chest Press (Machine)":            (0, 9),    # bench_press / incline_dumbbell_bench_press (closest machine)
     "Iso-Lateral Chest Press (Machine)":        (0, 6),    # bench_press / dumbbell_bench_press (closest)
     "Chest Press (Band)":                       (0, 1),    # bench_press / barbell_bench_press (closest)
@@ -147,7 +147,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Lat Pulldown - Close Grip (Cable)":        (21, 5),   # pull_up / close_grip_lat_pulldown
     "Negative Pull Up":                         (21, 38),  # pull_up / pull_up (negative variant)
     "Pull Up":                                  (21, 38),  # pull_up / pull_up
-    "Pull Up (Assisted)":                       (21, 0),   # pull_up / banded_pull_ups
+    "Pull Up (Assisted)":                       (21, 38),  # pull_up / pull_up
     "Pull Up (Band)":                           (21, 0),   # pull_up / banded_pull_ups
     "Pull Up (Weighted)":                       (21, 24),  # pull_up / weighted_pull_up
     "Reverse Grip Lat Pulldown (Cable)":        (21, 18),  # pull_up / reverse_grip_pulldown
@@ -233,7 +233,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Shrug (Machine)":                          (26, 5),   # shrug / dumbbell_shrug (closest machine)
     "Shrug (Smith Machine)":                    (26, 1),   # shrug / barbell_shrug (closest)
     "Upright Row (Barbell)":                    (26, 2),   # shrug / barbell_upright_row
-    "Upright Row (Cable)":                      (26, 6),   # shrug / dumbbell_upright_row (closest cable)
+    "Upright Row (Cable)":                      (26, 24),  # shrug / upright_row
     "Upright Row (Dumbbell)":                   (26, 6),   # shrug / dumbbell_upright_row
     "Jump Shrug":                               (26, 0),   # shrug / barbell_jump_shrug
 
@@ -388,9 +388,9 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Deadlift (Trap bar)":                      (8, 17),   # deadlift / trap_bar_deadlift
     "Deadlift High Pull":                       (8, 16),   # deadlift / sumo_deadlift_high_pull (closest)
     "Rack Pull":                                (8, 7),    # deadlift / rack_pull
-    "Romanian Deadlift (Barbell)":              (8, 1),    # deadlift / barbell_straight_leg_deadlift
+    "Romanian Deadlift (Barbell)":              (8, 23),  # deadlift / romanian_deadlift
     "Romanian Deadlift (Smith Machine)":        (8, 23),   # deadlift / romanian_deadlift (smith)
-    "Romanian Deadlift (Dumbbell)":             (8, 4),    # deadlift / dumbbell_straight_leg_deadlift
+    "Romanian Deadlift (Dumbbell)":             (8, 23),  # deadlift / romanian_deadlift
     "Single Leg Romanian Deadlift (Barbell)":   (8, 10),   # deadlift / single_leg_barbell_deadlift
     "Single Leg Romanian Deadlift (Dumbbell)":  (8, 14),   # deadlift / single_leg_romanian_deadlift_with_dumbbell
     "Straight Leg Deadlift":                    (8, 25),  # deadlift / straight_leg_deadlift
@@ -468,7 +468,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     # ======================================================================= #
     #  CORE – Core (category 5)
     # ======================================================================= #
-    "Ab Scissors":                              (5, 65535),  # core / generic: Garmin has no closer name
+    "Ab Scissors":                              (6, 13),  # crunch / flutter_kicks
     "Cable Core Pallof Press":                  (5, 6),    # core / cable_core_press (exact anti-rotation match)
     "Cable Core Palloff Press":                 (5, 6),    # alias: earlier misspelling of the above
     "Cable Twist (Down to up)":                 (4, 2),    # chop / cable_woodchop (twist variant)
@@ -487,7 +487,7 @@ HEVY_TO_GARMIN: dict[str, tuple[int, int]] = {
     "Bicycle Crunch Raised Legs":               (6, 0),    # crunch / bicycle_crunch (raised legs)
     "Cable Crunch":                             (6, 1),    # crunch / cable_crunch
     "Crunch":                                   (6, 83),   # crunch / crunch
-    "Crunch (Machine)":                         (6, 28),   # crunch / kneeling_cable_crunch (closest machine)
+    "Crunch (Machine)":                         (6, 83),  # crunch / crunch
     "Crunch (Weighted)":                        (6, 79),   # crunch / weighted_crunch
     "Decline Crunch":                           (6, 83),   # crunch / crunch (decline variant)
     "Decline Crunch (Weighted)":                (6, 79),   # crunch / weighted_crunch (decline)

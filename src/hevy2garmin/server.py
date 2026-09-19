@@ -1888,16 +1888,13 @@ async def api_sync_single(request: Request, workout_id: str):
             trigger="manual (single)",
         )
 
-        start = (workout.get("start_time") or "")[:16]
-        badge = {
-            "synced": '<span class="badge badge-success">✓ Synced</span>',
-            "processing": '<span class="badge badge-pending">Processing on Garmin</span>',
-            "needs_review": '<span class="badge badge-pending">Needs review</span>',
-        }.get(one.status, '<span class="badge badge-pending">Rejected by Garmin</span>')
-        return HTMLResponse(f'<tr><td>{badge}</td><td>{escape(start)}</td><td><strong>{escape(workout["title"])}</strong></td><td>{len(workout.get("exercises", []))}</td><td></td></tr>')
+        # The Workouts page is cards, and it already renders every status
+        # (synced, processing, needs review, failed) from the ledger and the
+        # pending row. Have htmx reload it instead of swapping in a second copy.
+        return HTMLResponse("", headers={"HX-Refresh": "true"})
     except Exception as e:
         _record_sync_log({"failed": 1}, trigger="manual (single)")
-        return HTMLResponse(f'<td colspan="5" style="color: var(--pico-del-color);">Failed: {escape(str(e))}</td>')
+        return HTMLResponse(f'<div class="card" style="color: var(--pico-del-color);">Failed: {escape(str(e))}</div>')
 
 
 @app.post("/api/unsync/{hevy_id}")
