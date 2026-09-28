@@ -143,7 +143,7 @@ class TestGenerateDescription:
         assert "🏋️ Push" in desc
         assert "200 kcal" in desc
         assert "avg 95 bpm" in desc
-        assert "hevy2garmin" in desc
+        assert "hevy2garmin" not in desc
 
     def test_includes_exercises(self, sample_workout: dict) -> None:
         desc = generate_description(sample_workout)

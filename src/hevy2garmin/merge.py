@@ -366,10 +366,7 @@ def _apply_name_and_description(client, activity_id, hevy_workout) -> None:
     title = hevy_workout.get("title", "Workout")
     rename_activity(client, activity_id, title)
     desc = generate_description(hevy_workout)
-    note = "synced by hevy2garmin"
-    if not desc.rstrip().endswith(note):
-        desc = f"{desc}\n{note}"
-    set_description(client, activity_id, f"Exercises synced from Hevy by hevy2garmin\n\n{desc}")
+    set_description(client, activity_id, desc)
 
 
 # ---------------------------------------------------------------------------

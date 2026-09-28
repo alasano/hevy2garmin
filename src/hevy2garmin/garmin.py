@@ -565,5 +565,4 @@ def generate_description(workout: dict, calories: int | None = None, avg_hr: int
                 s_label = "set" if len(warmup) == 1 else "sets"
                 lines.append(f"• {name}: {len(warmup)} warmup {s_label}")
 
-    lines.append("\n— synced by hevy2garmin")
     return "\n".join(lines)

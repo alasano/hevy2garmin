@@ -609,6 +609,7 @@ def test_watch_activity_is_merged_in_place(mock_gen, mock_desc, mock_rename, moc
     assert result.force_fresh_upload is False
     mock_push.assert_called_once()     # pushed the sets into the watch activity
     mock_rename.assert_called_once()   # renamed + described it in place
+    mock_desc.assert_called_once_with(mock_rename.call_args.args[0], 12345, "Dumbbell Row: 3 sets")
 
 
 # ---------------------------------------------------------------------------
