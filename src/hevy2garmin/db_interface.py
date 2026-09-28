@@ -10,6 +10,19 @@ class Database(ABC):
     """Abstract base class for workout sync storage."""
 
     @abstractmethod
+    def enqueue_webhook(self, hevy_id: str, due_at: float) -> bool:
+        """Insert a job once; duplicate deliveries preserve its state and deadline."""
+
+    @abstractmethod
+    def get_due_webhook(self, now: float) -> dict | None:
+        """Return the earliest pending job due for the single server worker."""
+
+    @abstractmethod
+    def save_webhook(self, hevy_id: str, status: str, attempts: int,
+                     due_at: float, last_error: str | None) -> None:
+        """Record an attempt outcome without deleting the job's history."""
+
+    @abstractmethod
     def is_synced(self, hevy_id: str) -> bool:
         """Check if a Hevy workout has already been synced."""
 

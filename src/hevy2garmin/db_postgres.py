@@ -61,6 +61,13 @@ class PostgresDatabase(Database):
                         status VARCHAR(20) DEFAULT 'success'
                     )
                 """)
+                cur.execute("""CREATE TABLE IF NOT EXISTS webhook_jobs (
+                hevy_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                due_at DOUBLE PRECISION NOT NULL,
+                last_error TEXT
+            )""")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS sync_log (
                         id BIGSERIAL PRIMARY KEY,
@@ -146,6 +153,31 @@ class PostgresDatabase(Database):
                     )
                 """)
             conn.commit()
+
+    def enqueue_webhook(self, hevy_id: str, due_at: float) -> bool:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO webhook_jobs (hevy_id, due_at) VALUES (%s, %s) "
+                    "ON CONFLICT (hevy_id) DO NOTHING", (hevy_id, due_at))
+                return cur.rowcount == 1
+
+    def get_due_webhook(self, now: float) -> dict | None:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM webhook_jobs WHERE status = 'pending' AND due_at <= %s "
+                    "ORDER BY due_at, hevy_id LIMIT 1", (now,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def save_webhook(self, hevy_id: str, status: str, attempts: int,
+                     due_at: float, last_error: str | None) -> None:
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE webhook_jobs SET status=%s, attempts=%s, due_at=%s, last_error=%s "
+                    "WHERE hevy_id=%s", (status, attempts, due_at, last_error, hevy_id))
 
     def is_synced(self, hevy_id: str) -> bool:
         with self._get_conn() as conn:

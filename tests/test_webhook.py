@@ -1,203 +1,257 @@
-"""Tests for the /api/cron/webhook receiver + staged retry worker."""
-
-from __future__ import annotations
+"""Webhook validation, durable jobs, and exact-workout retries."""
 
 import asyncio
 import os
-from unittest.mock import AsyncMock, patch
+import threading
+from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from requests import ConnectionError
+
+from hevy2garmin import server, webhook
+from hevy2garmin.db_sqlite import SQLiteDatabase
+from hevy2garmin.hevy import HevyAuthError
+from hevy2garmin.merge import MergeFailed
+from hevy2garmin.sync import SyncOneResult
+
+WID = "f1085cdb-32b2-4003-967d-53a3af8eaecb"
+OTHER = "11111111-1111-4111-8111-111111111111"
+HEADERS = {"Authorization": "Bearer cron-123"}
+
+
+@pytest.fixture(params=["sqlite", "postgres"] if os.environ.get("DATABASE_URL") else ["sqlite"])
+def store(request, tmp_path):
+    if request.param == "postgres":
+        from hevy2garmin.db_postgres import PostgresDatabase
+        db = PostgresDatabase(os.environ["DATABASE_URL"])
+        with db._get_conn() as conn:
+            with conn.cursor() as cur:
+                for table in ("webhook_jobs", "synced_workouts", "pending_uploads", "sync_log"):
+                    cur.execute(f"DELETE FROM {table}")
+        yield db
+        db._conn_cache.close()
+    else:
+        yield SQLiteDatabase(tmp_path / "webhooks.db")
 
 
 @pytest.fixture
-def client_with_cron_secret():
-    with patch.dict(os.environ, {"CRON_SECRET": "cron-123"}):
-        from hevy2garmin.server import app
-        yield TestClient(app)
+def client(store, monkeypatch):
+    monkeypatch.setenv("CRON_SECRET", "cron-123")
+    monkeypatch.delenv("HEVY2GARMIN_SECRET", raising=False)
+    monkeypatch.setattr(server, "_is_configured_cache", True)
+    monkeypatch.setattr(server.db, "get_db", lambda: store)
+    monkeypatch.setattr(server, "WEBHOOK_DELAY_SECONDS", 30)
+    return TestClient(server.app)
 
 
-class TestWebhookEndpoint:
-    def test_rejects_missing_bearer(self, client_with_cron_secret) -> None:
-        resp = client_with_cron_secret.post("/api/cron/webhook")
-        assert resp.status_code == 401
-
-    def test_rejects_wrong_bearer(self, client_with_cron_secret) -> None:
-        resp = client_with_cron_secret.post(
-            "/api/cron/webhook", headers={"Authorization": "Bearer nope"}
-        )
-        assert resp.status_code == 401
-
-    def test_accepts_and_schedules_background_sync(self, client_with_cron_secret) -> None:
-        """Valid Bearer → immediate 200 (Hevy requires an answer within 5 s)."""
-        with patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock) as worker:
-            resp = client_with_cron_secret.post(
-                "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
-            )
-        assert resp.status_code == 200
-        assert resp.json() == {"status": "accepted"}
-        worker.assert_called_once()
-
-    def test_not_blocked_by_dashboard_auth(self) -> None:
-        """POST /api/cron/webhook bypasses the cookie/X-Api-Key middleware."""
-        with patch.dict(
-            os.environ, {"HEVY2GARMIN_SECRET": "dash-secret", "CRON_SECRET": "cron-123"}
-        ):
-            from hevy2garmin.server import app
-            client = TestClient(app)
-            with patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock):
-                resp = client.post(
-                    "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
-                )
-        assert resp.status_code == 200
+def test_authentication_precedes_body_parsing(client, monkeypatch):
+    assert client.post("/api/cron/webhook").status_code == 401
+    assert client.post("/api/cron/webhook", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    monkeypatch.delenv("CRON_SECRET")
+    assert client.post("/api/cron/webhook", headers=HEADERS).status_code == 503
 
 
-class TestWebhookAuthFailsClosed:
-    """No CRON_SECRET must mean unavailable, not unauthenticated.
-
-    /api/cron/webhook is internet-facing (Hevy calls it) and is exempt from the
-    dashboard cookie/CSRF middleware, so an `if secret:` guard that skips the
-    check when the secret is unset leaves an anonymous sync trigger exposed —
-    including on an instance whose owner did set a dashboard password.
-    """
-
-    def test_unset_cron_secret_refuses_instead_of_accepting(self) -> None:
-        with patch.dict(os.environ, {"HEVY2GARMIN_SECRET": "dash-password"}):
-            os.environ.pop("CRON_SECRET", None)
-            from hevy2garmin.server import app
-
-            with patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock) as worker:
-                resp = TestClient(app).post("/api/cron/webhook")
-            assert resp.status_code == 503
-            assert "CRON_SECRET" in resp.json()["error"]
-            worker.assert_not_called(), "no sync may be scheduled by an unauthenticated caller"
-
-    def test_a_near_miss_token_is_rejected(self, client_with_cron_secret) -> None:
-        for bad in ("Bearer cron-12", "Bearer cron-1234", "cron-123", "Basic cron-123", ""):
-            resp = client_with_cron_secret.post(
-                "/api/cron/webhook", headers={"Authorization": bad}
-            )
-            assert resp.status_code == 401, bad
-
-    def test_correct_token_still_accepted(self, client_with_cron_secret) -> None:
-        with patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock):
-            resp = client_with_cron_secret.post(
-                "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
-            )
-        assert resp.status_code == 200
-
-    def test_bearer_check_is_constant_time(self) -> None:
-        """A `!=` compare on the raw string leaks the secret byte by byte."""
-        import inspect
-
-        from hevy2garmin import server
-
-        src = inspect.getsource(server._bearer_ok)
-        assert "compare_digest" in src
+@pytest.mark.parametrize("body", [None, [], {}, {"id": WID}, {"workoutId": 7},
+                                      {"workoutId": "../invalid"}, {"payload": {"workoutId": WID}}])
+def test_rejects_missing_or_invalid_workout_id(client, store, body):
+    assert client.post("/api/cron/webhook", headers=HEADERS, json=body).status_code == 400
+    assert store.get_due_webhook(float("inf")) is None
 
 
-class TestInFlightCap:
-    """A staged sync lives up to ~2 h, so unbounded spawning is a pile-up vector."""
-
-    def test_beyond_the_cap_no_new_task_is_spawned(self, client_with_cron_secret) -> None:
-        from hevy2garmin import server
-
-        filler = {object() for _ in range(server.WEBHOOK_MAX_INFLIGHT)}
-        with (
-            patch.object(server, "_webhook_tasks", filler),
-            patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock) as worker,
-        ):
-            resp = client_with_cron_secret.post(
-                "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
-            )
-        assert resp.status_code == 200, "Hevy must not be told to retry into the same wall"
-        assert resp.json()["status"] == "throttled"
-        worker.assert_not_called()
-
-    def test_under_the_cap_still_schedules(self, client_with_cron_secret) -> None:
-        from hevy2garmin import server
-
-        with (
-            patch.object(server, "_webhook_tasks", set()),
-            patch("hevy2garmin.server._webhook_sync", new_callable=AsyncMock) as worker,
-        ):
-            resp = client_with_cron_secret.post(
-                "/api/cron/webhook", headers={"Authorization": "Bearer cron-123"}
-            )
-        assert resp.json()["status"] == "accepted"
-        worker.assert_called_once()
+def test_delay_dedup_and_queue_bursts(client, store):
+    with patch.object(server.time, "time", return_value=100):
+        response = client.post("/api/cron/webhook", headers=HEADERS, json={"workoutId": WID})
+    assert response.json() == {"status": "accepted", "workout_id": WID}
+    with patch.object(server.time, "time", return_value=110):
+        response = client.post("/api/cron/webhook", headers=HEADERS, json={"workoutId": WID})
+    assert response.json()["status"] == "duplicate"
+    assert store.get_due_webhook(129) is None
+    assert store.get_due_webhook(130)["attempts"] == 0
+    for n in range(6):
+        wid = f"00000000-0000-4000-8000-{n:012d}"
+        assert client.post("/api/cron/webhook", headers=HEADERS, json={"workoutId": wid}).json()["status"] == "accepted"
 
 
-class TestWebhookWorker:
-    """Staged retry semantics: every attempt is merge_only. A plain upload
-    from here would be a duplicate once the watch activity arrives, so a workout
-    that never merges is left to auto-sync."""
+def test_persistence_failure_is_not_acknowledged(client, store):
+    with patch.object(store, "enqueue_webhook", side_effect=RuntimeError("database unavailable")):
+        assert client.post("/api/cron/webhook", headers=HEADERS, json={"workoutId": WID}).status_code == 503
 
-    def _run(self, responses: list[dict]) -> list[bool]:
-        from hevy2garmin import server
 
-        calls: list[bool] = []
+def test_restart_and_terminal_dedup(store):
+    store.enqueue_webhook(WID, 30)
+    if isinstance(store, SQLiteDatabase):
+        reopened = SQLiteDatabase(store.db_path)
+    else:
+        reopened = type(store)(store.database_url)
+    try:
+        assert reopened.get_due_webhook(30)["hevy_id"] == WID
+        reopened.save_webhook(WID, "completed", 1, 330, None)
+        assert store.enqueue_webhook(WID, 500) is False
+        assert store.get_due_webhook(1000) is None
+    finally:
+        if getattr(reopened, "_conn_cache", None):
+            reopened._conn_cache.close()
 
-        async def fake_sync_one(merge_only=False, **kwargs):
-            calls.append(merge_only)
-            return JSONResponse(responses[len(calls) - 1])
 
-        with (
-            patch.object(server, "WEBHOOK_DELAY_SECONDS", 0),
-            patch.object(server, "WEBHOOK_RETRY_INTERVAL_SECONDS", 0),
-            patch.object(server, "WEBHOOK_MAX_ATTEMPTS", 3),
-            patch.object(server, "_sync_one_recorded", fake_sync_one),
-        ):
-            asyncio.run(server._webhook_sync())
-        return calls
+@pytest.fixture
+def execution(store, monkeypatch):
+    store.enqueue_webhook(WID, 30)
+    hevy = MagicMock()
+    hevy.get_workout.return_value = {"id": WID, "title": "Push"}
+    monkeypatch.setattr(webhook, "HevyClient", lambda **kw: hevy)
+    monkeypatch.setattr(webhook, "get_client", lambda *a: "garmin")
+    reset = MagicMock()
+    monkeypatch.setattr(webhook, "reset_circuit_breaker", reset)
+    sync = MagicMock(return_value=SyncOneResult(status="merge_pending"))
+    monkeypatch.setattr(webhook, "sync_one_workout", sync)
+    return hevy, sync, reset
 
-    def test_never_falls_back_to_a_full_sync(self) -> None:
-        """The last attempt is merge_only too, and the worker then gives up."""
-        pending = {"synced": 0, "merge_pending": True, "done": False}
-        calls = self._run([pending, pending, pending])
-        assert calls == [True, True, True]
 
-    def test_gives_up_without_waiting_after_the_last_attempt(self) -> None:
-        """A finished task frees its in-flight slot at once."""
-        pending = {"synced": 0, "merge_pending": True, "done": False}
-        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
-            self._run([pending, pending, pending])
-        assert sleep.await_count == 3  # the delay, then one gap before attempts 2 and 3
+def run_job(store, now=30, config=None, max_attempts=24):
+    with patch.object(webhook.time, "time", return_value=now):
+        webhook.process_job(store, store.get_due_webhook(now), config or {"hevy_api_key": "test"},
+                            retry_seconds=300, max_attempts=max_attempts)
 
-    def test_stops_after_first_successful_sync(self) -> None:
-        calls = self._run([{"synced": 1, "done": True}])
-        assert calls == [True]
 
-    def test_stops_when_nothing_is_pending(self) -> None:
-        calls = self._run([{"synced": 0, "merge_pending": False, "done": False}])
-        assert calls == [True]
+def test_exact_id_and_retry_schedule(store, execution):
+    hevy, sync, reset = execution
+    store.enqueue_webhook(OTHER, 900)
+    run_job(store)
+    hevy.get_workout.assert_called_once_with(WID)
+    hevy.get_workouts.assert_not_called()
+    assert sync.call_args.kwargs["merge_only"] is True
+    assert sync.call_args.kwargs["database"] is store
+    assert store.get_due_webhook(329) is None
+    assert store.get_due_webhook(330)["attempts"] == 1
+    sync.return_value = SyncOneResult(status="synced")
+    run_job(store, 330)
+    assert reset.call_count == 2
+    assert store.get_due_webhook(899) is None
+    assert store.get_due_webhook(900)["hevy_id"] == OTHER
+    assert store.get_sync_log()[0]["synced"] == 1
 
-    def test_a_lock_collision_is_retried_not_treated_as_done(self) -> None:
-        """auto-sync holding the lock is not an answer about this workout.
 
-        The busy reply carries no merge_pending, so a plain "did it merge?"
-        check reads it as "nothing to do" and abandons the webhook sync — the
-        workout then waits for the next auto-sync, which is the delay the
-        webhook exists to remove.
-        """
-        busy = {"error": "Sync already running", "busy": True}
-        calls = self._run([busy, busy, {"synced": 1, "done": True}])
-        assert calls == [True, True, True]
+def test_already_synced_never_merges(store, execution):
+    store.mark_synced(WID, "123", title="Push")
+    run_job(store)
+    execution[0].get_workout.assert_not_called()
+    execution[1].assert_not_called()
+    assert store.get_due_webhook(1000) is None
 
-    def test_a_raising_attempt_stops_the_worker(self) -> None:
-        from hevy2garmin import server
 
-        calls: list[bool] = []
+def test_pending_upload_keeps_ownership(store, execution):
+    with patch.object(store, "get_pending", return_value={"phase": "processing"}):
+        run_job(store)
+    execution[1].assert_not_called()
+    assert store.get_due_webhook(1000) is None
 
-        async def boom(merge_only=False, **kwargs):
-            calls.append(merge_only)
-            raise RuntimeError("Garmin unreachable")
 
-        with (
-            patch.object(server, "WEBHOOK_DELAY_SECONDS", 0),
-            patch.object(server, "WEBHOOK_RETRY_INTERVAL_SECONDS", 0),
-            patch.object(server, "_sync_one_recorded", boom),
-        ):
-            asyncio.run(server._webhook_sync())
-        assert calls == [True], "auto-sync is the safety net; don't hammer a broken backend"
+@pytest.mark.parametrize("failure", [ConnectionError("temporary"), None])
+def test_transient_failure_or_not_yet_visible_retries(store, execution, failure):
+    hevy, _, _ = execution
+    hevy.get_workout.side_effect = failure
+    hevy.get_workout.return_value = None
+    run_job(store)
+    assert store.get_due_webhook(330)["attempts"] == 1
+
+
+def test_wrapped_auth_failure_stops(store, execution):
+    failure = MergeFailed("Garmin login required")
+    failure.__cause__ = HevyAuthError("Reconnect account")
+    execution[1].side_effect = failure
+    run_job(store)
+    assert store.get_due_webhook(1000) is None
+    assert store.get_sync_log()[0]["failed"] == 1
+
+
+def test_disabled_merge_stops_without_upload(store, execution):
+    run_job(store, config={"hevy_api_key": "test", "merge_mode": False})
+    execution[1].assert_not_called()
+    assert store.get_due_webhook(1000) is None
+
+
+def test_exhaustion_stops_and_records_failure(store, execution):
+    run_job(store, max_attempts=1)
+    assert store.get_due_webhook(1000) is None
+    assert store.get_sync_log()[0]["failed"] == 1
+
+
+def test_worker_busy_does_not_consume_attempt(store, monkeypatch):
+    store.enqueue_webhook(WID, 0)
+    stop = threading.Event()
+    def busy(**kwargs):
+        stop.set()
+        return False
+    monkeypatch.setattr(server, "_webhook_stop", stop)
+    monkeypatch.setattr(server, "_acquire_sync_lock", busy)
+    monkeypatch.setattr(server.db, "get_db", lambda: store)
+    monkeypatch.setattr(server.db, "get_database_url", lambda: getattr(store, "database_url", None))
+    server._webhook_worker()
+    assert store.get_due_webhook(30)["attempts"] == 0
+
+
+def test_worker_recovers_due_job_on_startup(store, execution, monkeypatch):
+    # A real thread consumes the durable job; stopping waits for its current attempt.
+    stop = threading.Event()
+    monkeypatch.setattr(server, "_webhook_stop", stop)
+    monkeypatch.setattr(server, "_webhook_thread", None)
+    monkeypatch.setattr(server.db, "get_db", lambda: store)
+    monkeypatch.setattr(server.db, "get_database_url", lambda: getattr(store, "database_url", None))
+    monkeypatch.setattr(server, "load_config", lambda **kw: {"hevy_api_key": "test"})
+    def finish(*args, **kwargs):
+        stop.set()
+        return SyncOneResult(status="synced")
+    execution[1].side_effect = finish
+    asyncio.run(server._start_webhook_worker())
+    server._webhook_thread.join(timeout=5)
+    assert not server._webhook_thread.is_alive()
+    assert store.get_due_webhook(float("inf")) is None
+    asyncio.run(server._stop_webhook_worker())
+
+
+def test_manual_sync_cannot_race_worker(client, store):
+    assert server._acquire_sync_lock()
+    try:
+        assert client.post(f"/api/sync/{WID}").status_code == 409
+    finally:
+        server._sync_executing.release()
+    store.mark_synced(WID, "123", title="Push")
+    with patch("hevy2garmin.hevy.HevyClient") as hevy:
+        response = client.post(f"/api/sync/{WID}")
+    assert response.headers["HX-Refresh"] == "true"
+    hevy.assert_not_called()
+    assert not server._sync_executing.locked()
+
+
+def test_merge_only_disabled_never_generates_fit():
+    from hevy2garmin.sync import sync_one_workout
+    store = MagicMock()
+    store.get_pending.return_value = None
+    with patch("hevy2garmin.sync.generate_fit") as fit:
+        with pytest.raises(ValueError, match="Enable merge mode"):
+            sync_one_workout({"id": WID}, cfg={"merge_mode": False},
+                             database=store, merge_only=True)
+    fit.assert_not_called()
+
+
+def test_development_merge_preserves_auth_failure():
+    from hevy2garmin.sync import sync_one_workout
+    from hevy2garmin.merge import MergeResult
+    from garminconnect import GarminConnectAuthenticationError
+    failure = GarminConnectAuthenticationError("Reconnect Garmin")
+    store = MagicMock()
+    store.get_pending.return_value = None
+    with patch("hevy2garmin.sync.attempt_merge", return_value=MergeResult(merged=False, error=failure)):
+        with pytest.raises(GarminConnectAuthenticationError):
+            sync_one_workout({"id": WID}, cfg={}, garmin_client=object(), database=store, merge_only=True)
+
+
+def test_merge_only_without_client_never_generates_fit():
+    from hevy2garmin.sync import sync_one_workout
+    store = MagicMock()
+    store.get_pending.return_value = None
+    with patch("hevy2garmin.sync.generate_fit") as fit:
+        with pytest.raises(ValueError, match="Garmin client required"):
+            sync_one_workout({"id": WID}, cfg={}, database=store, merge_only=True)
+    fit.assert_not_called()

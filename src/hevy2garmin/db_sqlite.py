@@ -133,8 +133,48 @@ class SQLiteDatabase(Database):
             conn.execute("ALTER TABLE synced_routines ADD COLUMN content_hash TEXT")
         except Exception:
             pass  # Column already exists
+        conn.execute("""CREATE TABLE IF NOT EXISTS webhook_jobs (
+                hevy_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                due_at DOUBLE PRECISION NOT NULL,
+                last_error TEXT
+            )""")
         conn.commit()
         return conn
+
+    def enqueue_webhook(self, hevy_id: str, due_at: float) -> bool:
+        conn = self._get_conn()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "INSERT INTO webhook_jobs (hevy_id, due_at) VALUES (?, ?) "
+                    "ON CONFLICT (hevy_id) DO NOTHING", (hevy_id, due_at))
+                return cur.rowcount == 1
+        finally:
+            conn.close()
+
+    def get_due_webhook(self, now: float) -> dict | None:
+        conn = self._get_conn()
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM webhook_jobs WHERE status = 'pending' AND due_at <= ? "
+                "ORDER BY due_at, hevy_id LIMIT 1", (now,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def save_webhook(self, hevy_id: str, status: str, attempts: int,
+                     due_at: float, last_error: str | None) -> None:
+        conn = self._get_conn()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE webhook_jobs SET status=?, attempts=?, due_at=?, last_error=? "
+                    "WHERE hevy_id=?", (status, attempts, due_at, last_error, hevy_id))
+        finally:
+            conn.close()
 
     def is_synced(self, hevy_id: str) -> bool:
         conn = self._get_conn()

@@ -56,7 +56,10 @@ class TestAPICalls:
 
     def test_get_workout_not_found_returns_none(self) -> None:
         client = HevyClient(api_key="test")
-        with patch.object(client, "_get", side_effect=RuntimeError("404")):
+        import requests
+        response = requests.Response()
+        response.status_code = 404
+        with patch.object(client, "_get", side_effect=requests.HTTPError(response=response)):
             assert client.get_workout("missing") is None
 
     def test_get_exercise_templates(self) -> None:
@@ -96,3 +99,14 @@ class TestRateLimiting:
             with patch("hevy2garmin.hevy.time.sleep") as mock_sleep:
                 client._get("/test")
                 mock_sleep.assert_called_once_with(0.5)
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+def test_get_workout_propagates_api_errors(status):
+    import requests
+    response = requests.Response()
+    response.status_code = status
+    client = HevyClient(api_key="test")
+    with patch.object(client, "_get", side_effect=requests.HTTPError(response=response)):
+        with pytest.raises(requests.HTTPError):
+            client.get_workout("workout")

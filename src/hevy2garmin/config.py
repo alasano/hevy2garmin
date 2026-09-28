@@ -48,7 +48,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
-def load_config() -> dict[str, Any]:
+def load_config(*, database=None) -> dict[str, Any]:
     """Load config from file, then overlay environment variables.
 
     Env vars take precedence over config file values:
@@ -70,7 +70,7 @@ def load_config() -> dict[str, Any]:
     if database_url:
         try:
             from hevy2garmin.db import get_db
-            _db = get_db()
+            _db = database if database is not None else get_db()
             if hasattr(_db, '_get_conn'):
                 with _db._get_conn() as conn:
                     with conn.cursor() as cur:

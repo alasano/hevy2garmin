@@ -84,19 +84,22 @@ class HevyClient:
         Works for ANY workout regardless of age — unlike scanning a page of
         recent workouts, which misses older ones and made the dashboard
         "Upload" button report "Workout not found" for users with more than a
-        page of history (#165). Returns the workout dict, or None if not found.
+        page of history (#165). Returns the workout dict, or None on HTTP 404.
+        Authentication, network and other API failures propagate to the caller.
         """
         try:
             data = self._get(f"/workouts/{workout_id}")
-        except Exception:
-            return None
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
         if isinstance(data, dict):
             if "id" in data:
                 return data
             # Defensive: handle a wrapped {"workout": {...}} shape too.
             if isinstance(data.get("workout"), dict):
                 return data["workout"]
-        return None
+        raise ValueError("Hevy returned an invalid workout response")
 
     def get_all_workouts(self, since_page: int = 1, page_size: int = 10) -> list[dict]:
         """Fetch all workouts (paginated). Returns list of workout dicts."""

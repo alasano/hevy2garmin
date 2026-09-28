@@ -213,6 +213,11 @@ class TestRecordingNeverBreaksASync:
 class TestPerRowSyncIsRecorded:
     """The workouts-page sync records on both paths, including its failure."""
 
+    @pytest.fixture(autouse=True)
+    def unsynced_workout(self, monkeypatch):
+        from hevy2garmin import db
+        monkeypatch.setattr(db, "is_synced", lambda wid: False)
+
     def test_success_records_manual_single(self, client, recorded, monkeypatch):
         from types import SimpleNamespace
 

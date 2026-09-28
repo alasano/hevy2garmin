@@ -190,7 +190,7 @@ _autosync_timer: threading.Timer | None = None
 _autosync_lock = threading.Lock()
 _sync_executing = threading.Lock()  # Prevents concurrent sync execution
 _sync_lock_acquired_at: float = 0  # time.time() when lock was acquired
-_SYNC_LOCK_TIMEOUT = 300  # 5 minutes — force-release if exceeded
+_SYNC_LOCK_TIMEOUT = 300  # retained for compatibility; live locks are never stolen
 _last_sync_time: datetime | None = None
 _unmapped_cache: list[tuple[str, int]] | None = None
 _unmapped_cache_time: float = 0
@@ -198,26 +198,16 @@ _failed_ids: set[str] = set()  # Workouts that failed upload this session (retri
 
 
 def _acquire_sync_lock(*, force: bool = True) -> bool:
-    """Try to acquire the sync lock. Force-release if held too long (hung sync).
+    """Acquire without stealing a live operation's lock.
 
-    ``force=False`` is for the webhook's merge-only polls: they come every few
-    minutes for hours, and "busy" just means the next poll tries again, so they
-    must never take the lock from a long but live sync.
+    ``force`` remains accepted for existing callers; elapsed time cannot prove
+    an operation has stopped, so it never permits concurrent Garmin writes.
     """
     global _sync_lock_acquired_at
     if _sync_executing.acquire(blocking=False):
         _sync_lock_acquired_at = time.time()
         return True
-    # Check if the lock has been held too long (hung sync)
-    if force and _sync_lock_acquired_at and (time.time() - _sync_lock_acquired_at) > _SYNC_LOCK_TIMEOUT:
-        logger.warning("Sync lock held for >%ds — force-releasing (likely hung)", _SYNC_LOCK_TIMEOUT)
-        try:
-            _sync_executing.release()
-        except RuntimeError:
-            pass
-        if _sync_executing.acquire(blocking=False):
-            _sync_lock_acquired_at = time.time()
-            return True
+
     return False
 
 
@@ -1853,6 +1843,8 @@ async def api_routine_unschedule(
 
 @app.post("/api/sync/{workout_id}", response_class=HTMLResponse)
 async def api_sync_single(request: Request, workout_id: str):
+    if not _acquire_sync_lock(force=False):
+        return HTMLResponse("Sync already running; try again shortly.", status_code=409)
     try:
         from hevy2garmin.hevy import HevyClient
         from hevy2garmin.garmin import get_client
@@ -1860,6 +1852,8 @@ async def api_sync_single(request: Request, workout_id: str):
         from hevy2garmin.sync import sync_one_workout
 
         force_upload = request.query_params.get("force") == "1"
+        if db.is_synced(workout_id) and not force_upload:
+            return HTMLResponse("", headers={"HX-Refresh": "true"})
 
         config = load_config()
         workout = HevyClient(api_key=config.get("hevy_api_key")).get_workout(workout_id)
@@ -1892,6 +1886,9 @@ async def api_sync_single(request: Request, workout_id: str):
     except Exception as e:
         _record_sync_log({"failed": 1}, trigger="manual (single)")
         return HTMLResponse(f'<div class="card" style="color: var(--pico-del-color);">Failed: {escape(str(e))}</div>')
+
+    finally:
+        _sync_executing.release()
 
 
 @app.post("/api/unsync/{hevy_id}")
@@ -2392,104 +2389,86 @@ async def cron_sync(request: Request, merge_only: bool = Query(False)):
 
 
 # ── Hevy webhook receiver ────────────────────────────────────────────────────
-# Hevy fires this when a workout is saved. The paired watch activity usually
-# reaches Garmin Connect a few minutes later, so the sync is staged: wait,
-# then try merge-only every few minutes for as long as the sync grace period
-# (two hours by default). It never uploads a plain FIT: a watch activity that
-# arrives after such an upload is a duplicate, and the workout would already
-# be marked synced. A workout that never merges is left to auto-sync, which
-# decides between merge and upload once the grace period is over. Retry state
-# is in-memory only; a restart drops it and auto-sync is the safety net.
-WEBHOOK_DELAY_SECONDS = int(os.environ.get("WEBHOOK_DELAY_SECONDS", "300"))
-WEBHOOK_RETRY_INTERVAL_SECONDS = int(os.environ.get("WEBHOOK_RETRY_INTERVAL_SECONDS", "300"))
-WEBHOOK_MAX_ATTEMPTS = int(os.environ.get("WEBHOOK_MAX_ATTEMPTS", "24"))
-# Ceiling on concurrently staged syncs; a burst past this is declined, not queued.
-WEBHOOK_MAX_INFLIGHT = int(os.environ.get("WEBHOOK_MAX_INFLIGHT", "4"))
-
-_webhook_tasks: set = set()  # strong refs — bare asyncio tasks get garbage collected
+WEBHOOK_DELAY_SECONDS = max(0, int(os.environ.get("WEBHOOK_DELAY_SECONDS", "30")))
+WEBHOOK_RETRY_INTERVAL_SECONDS = max(1, int(os.environ.get("WEBHOOK_RETRY_INTERVAL_SECONDS", "300")))
+WEBHOOK_MAX_ATTEMPTS = max(1, int(os.environ.get("WEBHOOK_MAX_ATTEMPTS", "24")))
+_webhook_stop = threading.Event()
+_webhook_thread: threading.Thread | None = None
 
 
-async def _webhook_sync() -> None:
-    """Background worker behind /api/cron/webhook."""
-    import asyncio
-    import json
+def _webhook_worker() -> None:
+    """Drain durable jobs off the event loop, using a private DB connection."""
+    from hevy2garmin.webhook import process_job
+    from hevy2garmin.db_sqlite import SQLiteDatabase
+    from hevy2garmin.db_postgres import PostgresDatabase
 
-    await asyncio.sleep(WEBHOOK_DELAY_SECONDS)
-    for attempt in range(1, WEBHOOK_MAX_ATTEMPTS + 1):
-        is_last = attempt == WEBHOOK_MAX_ATTEMPTS
-        try:
-            resp = await _sync_one_recorded(merge_only=True, trigger="webhook")
-            data = json.loads(bytes(resp.body))
-        except Exception as e:
-            logger.error("Webhook sync attempt %d/%d failed: %s",
-                         attempt, WEBHOOK_MAX_ATTEMPTS, str(e)[:300])
-            return
-        # A lock collision with auto-sync is not an answer — retry, don't give up.
-        retry = bool(data.get("busy")) or bool(data.get("merge_pending"))
-        if not retry:
-            # Synced, nothing left to sync, or an error that auto-sync will retry.
-            logger.info("Webhook sync attempt %d/%d: %s", attempt, WEBHOOK_MAX_ATTEMPTS, data)
-            return
-        if not is_last:
-            await asyncio.sleep(WEBHOOK_RETRY_INTERVAL_SECONDS)
-    logger.warning(
-        "Webhook sync: no merge after %d attempts, auto-sync will retry",
-        WEBHOOK_MAX_ATTEMPTS,
-    )
+    store = None
+    try:
+        while not _webhook_stop.is_set():
+            try:
+                if store is None:
+                    url = db.get_database_url()
+                    store = PostgresDatabase(url) if url else SQLiteDatabase(db.get_db().db_path)
+                job = store.get_due_webhook(time.time())
+                if not job:
+                    _webhook_stop.wait(1)
+                    continue
+                if not _acquire_sync_lock(force=False):
+                    _webhook_stop.wait(1)
+                    continue
+                try:
+                    process_job(store, job, load_config(database=store),
+                                retry_seconds=WEBHOOK_RETRY_INTERVAL_SECONDS,
+                                max_attempts=WEBHOOK_MAX_ATTEMPTS)
+                finally:
+                    _sync_executing.release()
+            except Exception:
+                logger.exception("Webhook worker failed; durable jobs will be retried")
+                _webhook_stop.wait(5)
+    finally:
+        if store is not None and getattr(store, "_conn_cache", None) is not None:
+            store._conn_cache.close()
+
+
+@app.on_event("startup")
+async def _start_webhook_worker() -> None:
+    global _webhook_thread
+    if _webhook_thread is None or not _webhook_thread.is_alive():
+        _webhook_stop.clear()
+        _webhook_thread = threading.Thread(target=_webhook_worker, name="hevy-webhooks", daemon=True)
+        _webhook_thread.start()
+
+
+@app.on_event("shutdown")
+async def _stop_webhook_worker() -> None:
+    _webhook_stop.set()
+    if _webhook_thread is not None:
+        await run_in_threadpool(_webhook_thread.join)
 
 
 @app.post("/api/cron/webhook")
 async def cron_webhook(request: Request):
-    """Hevy webhook endpoint, fired when a workout is saved.
-
-    Hevy expects a 200 within a few seconds, so this only checks the Bearer
-    token and schedules the staged sync in the background.
-    """
-    import asyncio
-
+    """Authenticate and durably enqueue the supplied workout before acknowledging."""
     from fastapi.responses import JSONResponse
+    from hevy2garmin.webhook import workout_id_from_payload
 
-    # Fail CLOSED. This endpoint is internet-facing by design and is exempt from
-    # the dashboard cookie/CSRF middleware, so treating "no secret set" as "no
-    # auth needed" leaves an anonymous sync trigger exposed on any instance
-    # whose owner set a dashboard password but assumed CRON_SECRET only matters
-    # for the scheduled cron. Unconfigured means unavailable, not open.
     cron_secret = os.environ.get("CRON_SECRET")
     if not cron_secret:
-        logger.warning(
-            "Hevy webhook refused: CRON_SECRET is not set, so there is no way to authenticate "
-            "Hevy. Set CRON_SECRET to enable the endpoint."
-        )
-        return JSONResponse(
-            {"error": "Webhook not configured: CRON_SECRET is unset"}, status_code=503
-        )
+        return JSONResponse({"error": "Webhook not configured: CRON_SECRET is unset"}, status_code=503)
     if not _bearer_ok(request, cron_secret):
-        logger.warning("Hevy webhook rejected: bad or missing Authorization header")
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        wid = workout_id_from_payload(await request.json())
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Expected a JSON object with a valid workoutId UUID"}, status_code=400)
+    try:
+        created = db.get_db().enqueue_webhook(wid, time.time() + WEBHOOK_DELAY_SECONDS)
+    except Exception:
+        logger.exception("Could not persist webhook workout %s", wid)
+        return JSONResponse({"error": "Could not queue workout; retry later"}, status_code=503)
+    logger.info("Webhook workout %s: %s", wid, "queued" if created else "duplicate")
+    return JSONResponse({"status": "accepted" if created else "duplicate", "workout_id": wid})
 
-    # Each accepted request owns a task for up to WEBHOOK_DELAY +
-    # (MAX_ATTEMPTS - 1) * RETRY_INTERVAL seconds (~2 h by default), so
-    # unbounded spawning lets a burst pile up tasks that only queue on the sync
-    # lock and hammer Garmin. Past the cap, decline to add another: those
-    # already staged plus auto-sync cover the work, and Hevy still gets a 200 so
-    # it does not retry into the same wall.
-    if len(_webhook_tasks) >= WEBHOOK_MAX_INFLIGHT:
-        logger.warning(
-            "Hevy webhook throttled: %d staged syncs already in flight — they and "
-            "auto-sync will pick this workout up",
-            len(_webhook_tasks),
-        )
-        return JSONResponse({"status": "throttled", "in_flight": len(_webhook_tasks)})
-
-    logger.info(
-        "Hevy webhook received — staged sync in %ds (up to %d attempts)",
-        WEBHOOK_DELAY_SECONDS,
-        WEBHOOK_MAX_ATTEMPTS,
-    )
-    task = asyncio.create_task(_webhook_sync())
-    _webhook_tasks.add(task)
-    task.add_done_callback(_webhook_tasks.discard)
-    return JSONResponse({"status": "accepted"})
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:

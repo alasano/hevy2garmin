@@ -299,17 +299,50 @@ An external scheduler can instead call `GET /api/cron/sync` with `Authorization:
 
 Polling means a finished workout waits up to a full interval. Hevy can push instead: point a Hevy webhook subscription at `POST /api/cron/webhook`, authenticated with the same `CRON_SECRET` bearer token as the cron endpoint.
 
-A webhook that synced immediately would be *worse* than polling for watch users, though: the paired Garmin activity has not arrived yet, the merge finds nothing, and the workout uploads as a plain FIT — leaving exactly the duplicate the merge exists to avoid. So the endpoint answers 200 straight away (Hevy times out in seconds) and stages the sync:
+The request body uses the format shown in [Hevy's developer settings](https://hevy.com/settings?developer):
+
+```json
+{"workoutId": "f1085cdb-32b2-4003-967d-53a3af8eaecb"}
+```
+
+The endpoint validates the workout UUID and saves a job in the configured database
+before returning `200`. Empty or malformed payloads return `400`; an unavailable
+job database returns `503` so the request can be retried. `CRON_SECRET` is required:
+missing configuration returns `503`, and an incorrect bearer token returns `401`.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `WEBHOOK_DELAY_SECONDS` | `300` | Wait this long before the first attempt |
-| `WEBHOOK_RETRY_INTERVAL_SECONDS` | `300` | Gap between attempts |
-| `WEBHOOK_MAX_ATTEMPTS` | `24` | Attempts before giving up |
+| `WEBHOOK_DELAY_SECONDS` | `30` | Delay before the first attempt |
+| `WEBHOOK_RETRY_INTERVAL_SECONDS` | `300` | Gap after an unsuccessful attempt |
+| `WEBHOOK_MAX_ATTEMPTS` | `24` | Maximum attempts per workout |
 
-Every attempt is merge-only: the defaults look for the watch activity every five minutes for two hours, the same span as the sync grace period, and never upload a plain FIT, because a watch activity that arrives afterwards would be a duplicate of a workout already marked synced. A workout that has not merged by then is left to auto-sync, which decides between merge and upload once the grace period is over, so keep auto-sync enabled. A Garmin or Hevy error ends the staged sync for that workout and auto-sync picks it up. Retry state is in memory, so a restart drops it. The polling lasts delay plus (attempts minus one) times interval. If you make that shorter than your grace period, a watch activity that arrives late is still merged, by auto-sync after the grace period instead of within minutes.
+Each attempt fetches only that workout by ID and tries to merge it into its
+matching Garmin activity. With the defaults, attempts occur around 30 seconds,
+5 minutes 30 seconds, 10 minutes 30 seconds, and so on. API request time and other
+active syncs can delay an attempt. A busy sync lock does not consume an attempt.
+Webhook processing requires merge mode and never uploads a separate FIT file.
 
-`CRON_SECRET` must be set for the endpoint to work at all — with no secret configured it answers `503` rather than accepting unauthenticated calls, since it is internet-facing and is deliberately exempt from the dashboard password. At most `WEBHOOK_MAX_INFLIGHT` (4) staged syncs run at once; past that a request is acknowledged but not staged, because the ones already running plus auto-sync cover the work.
+Duplicate deliveries reuse the stored job without resetting its timer, including
+when the job has already finished. Bursts queue without dropping workouts. Jobs
+survive restarts; the worker resumes overdue jobs on startup and stops after each
+job succeeds, fails permanently, or exhausts its retries. Already-synced workouts
+are skipped, and existing pending uploads remain owned by their reconciliation
+process. Webhooks do not re-sync edits to already-synced workouts.
+
+Temporary API failures and workouts not yet visible in Hevy are retried.
+Authentication and configuration errors stop the job and are recorded. Logs name
+the workout ID, attempt and outcome; the `webhook_jobs` table retains the status,
+attempt count, next due time (Unix seconds), and last error. Successes and terminal
+failures also appear in sync history. After fixing a terminal error, use the
+existing manual sync or auto-sync path; another duplicate webhook does not reset
+that job.
+
+Keep auto-sync enabled as the safety net for workouts that cannot merge within
+the retry window. It handles merge or upload after the configured grace period.
+Run one long-running server process with persistent database storage: the worker
+shares the server's in-process sync lock with manual and automatic syncs. The old
+`WEBHOOK_MAX_INFLIGHT` setting is no longer used; queued jobs are processed one at
+a time.
 
 ### Running as a non-root user
 

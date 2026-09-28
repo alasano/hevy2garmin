@@ -127,7 +127,7 @@ class TestForceReleasedLock:
         try:
             with self._held_too_long():
                 assert _acquire_sync_lock(force=False) is False
-                assert _acquire_sync_lock() is True  # a manual sync still can
+                assert _acquire_sync_lock() is False  # elapsed time cannot prove the owner stopped
         finally:
             try:  # a failed assert leaves the lock in either state
                 _sync_executing.release()

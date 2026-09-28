@@ -314,6 +314,10 @@ def sync_one_workout(
     logger.info("Syncing: %s (%s)", title, wid)
 
     merge_mode = cfg.get("merge_mode", True)
+    if merge_only and not merge_mode:
+        raise ValueError("Enable merge mode to process webhook workouts")
+    if merge_only and not dry_run and garmin_client is None:
+        raise ValueError("Garmin client required for a merge-only sync")
     merge_overlap_pct = cfg.get("merge_overlap_pct", 70) / 100.0
     merge_max_drift_min = cfg.get("merge_max_drift_min", 20)
     merge_activity_types = set(cfg.get("merge_activity_types", ["strength_training"]))
@@ -361,6 +365,8 @@ def sync_one_workout(
         # unsynced so the next attempt can merge once the watch activity has
         # had more time to reach Garmin Connect.
         if merge_only and not dry_run:
+            if merge_result.error is not None:
+                raise merge_result.error
             logger.info(
                 "  merge_only: no mergeable Garmin watch activity yet for '%s', will retry",
                 title,

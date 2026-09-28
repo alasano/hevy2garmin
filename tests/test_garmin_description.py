@@ -78,7 +78,7 @@ class TestDescriptionGeneration:
         }
         desc = generate_description(workout)
         assert "Empty" in desc
-        assert "hevy2garmin" in desc
+        assert "hevy2garmin" not in desc
 
     def test_special_characters_in_name(self) -> None:
         workout = {

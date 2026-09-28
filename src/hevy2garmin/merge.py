@@ -52,6 +52,7 @@ class MergeResult:
     # names (#159). Tells the caller to upload a SEPARATE named activity instead
     # of deduping against the match.
     force_fresh_upload: bool = False
+    error: Exception | None = None
 
 
 def _names_applied(client, activity_id) -> bool:
@@ -464,7 +465,7 @@ def attempt_merge(
             logger.error("PUT exerciseSets failed for activity %s: %s", activity_id, failure)
             if is_watch:
                 raise MergeFailed(str(failure)) from failure
-            return MergeResult(merged=False, fallback_reason=f"PUT failed: {failure}")
+            return MergeResult(merged=False, fallback_reason=f"PUT failed: {failure}", error=failure)
 
     # Verify the names on hevy2garmin's own uploads (DEVELOPMENT) and fall back
     # to a named upload if Garmin dropped them. A watch activity is kept whatever
